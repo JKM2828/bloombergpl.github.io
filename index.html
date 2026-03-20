@@ -22,6 +22,7 @@
     <div class="logo"><i data-lucide="bar-chart-3" class="icon-logo"></i> GPW Bloomberg <span class="version-tag">AI v2.0</span> <span class="data-source-badge"><i data-lucide="database" class="icon-inline"></i> GPW API + Stooq EOD</span></div>
     <nav>
       <button class="nav-btn active" data-view="dashboard"><i data-lucide="layout-dashboard"></i> Dashboard</button>
+      <button class="nav-btn" data-view="today"><i data-lucide="zap"></i> Sygnały Dnia</button>
       <button class="nav-btn" data-view="predictions"><i data-lucide="brain"></i> Predykcje</button>
       <button class="nav-btn" data-view="signals"><i data-lucide="radio"></i> Sygnały</button>
       <button class="nav-btn" data-view="screener"><i data-lucide="scan-search"></i> Screener</button>
@@ -87,6 +88,40 @@
         <table id="instruments-table">
           <thead>
             <tr><th>Ticker</th><th>Nazwa</th><th>Sektor</th><th>Typ</th><th>Cena</th><th>Akcja</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ SYGNAŁY DNIA VIEW ============ -->
+    <section id="view-today" class="view">
+      <h2><i data-lucide="zap" class="icon-inline"></i> Sygnały Dnia – Co kupić / sprzedać</h2>
+      <div class="disclaimer-box">
+        Analiza algorytmiczna. Nie stanowi rekomendacji inwestycyjnej. Inwestowanie wiąże się z ryzykiem utraty kapitału.
+      </div>
+      <div class="grid-3" style="margin-bottom:16px">
+        <div class="card" style="border-left:4px solid var(--green)">
+          <h3 style="color:var(--green)"><i data-lucide="trending-up" class="icon-inline"></i> KUP</h3>
+          <div id="today-buy-count" class="big-number" style="color:var(--green)">—</div>
+        </div>
+        <div class="card" style="border-left:4px solid var(--red)">
+          <h3 style="color:var(--red)"><i data-lucide="trending-down" class="icon-inline"></i> SPRZEDAJ</h3>
+          <div id="today-sell-count" class="big-number" style="color:var(--red)">—</div>
+        </div>
+        <div class="card" style="border-left:4px solid var(--text-muted)">
+          <h3><i data-lucide="activity" class="icon-inline"></i> Reżim rynku</h3>
+          <div id="today-regime" class="big-number">—</div>
+        </div>
+      </div>
+      <div class="card">
+        <table id="today-table">
+          <thead>
+            <tr>
+              <th>Ticker</th><th>Nazwa</th><th>Typ</th><th>Cena</th>
+              <th>Akcja</th><th>Pewność %</th><th>Oczek. zwrot %</th>
+              <th>RSI</th><th>Uzasadnienie</th>
+            </tr>
           </thead>
           <tbody></tbody>
         </table>

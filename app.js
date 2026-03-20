@@ -19,6 +19,7 @@ document.querySelectorAll('.nav-btn').forEach((btn) => {
     // Load data for view
     switch (btn.dataset.view) {
       case 'dashboard': loadDashboard(); break;
+      case 'today': loadToday(); break;
       case 'predictions': loadPredictions(); break;
       case 'signals': loadSignals(); break;
       case 'screener': loadScreener(); break;
@@ -61,6 +62,45 @@ function dirBadge(dir) {
 function riskBadge(level) {
   const cls = level === 'LOW' ? 'badge-low' : level === 'MEDIUM' ? 'badge-medium' : 'badge-high';
   return `<span class="badge ${cls}">${level}</span>`;
+}
+
+// ============================================================
+// SYGNAŁY DNIA – Co kupić / sprzedać
+// ============================================================
+async function loadToday() {
+  try {
+    const data = await api('/today?limit=50');
+    const buyActions = data.actions.filter(a => a.action === 'KUP');
+    const sellActions = data.actions.filter(a => a.action !== 'KUP');
+
+    document.getElementById('today-buy-count').textContent = buyActions.length;
+    document.getElementById('today-sell-count').textContent = sellActions.length;
+    document.getElementById('today-regime').textContent = data.regime || '—';
+
+    const tbody = document.querySelector('#today-table tbody');
+    if (data.actions.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted)">Brak sygnałów. Uruchom pipeline ML aby wygenerować predykcje.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = data.actions.map(a => {
+      const actionCls = a.action === 'KUP' ? 'badge-buy' : (a.action === 'TRZYMAJ' ? 'badge-hold' : 'badge-sell');
+      return `<tr>
+        <td><strong>${a.ticker}</strong></td>
+        <td>${a.name || '—'}</td>
+        <td>${a.type || '—'}</td>
+        <td>${a.price != null ? fmt(a.price) : '—'}</td>
+        <td><span class="badge ${actionCls}">${a.action}</span></td>
+        <td>${a.confidence != null ? fmt(a.confidence, 1) + '%' : '—'}</td>
+        <td class="${pnlClass(a.expectedReturn)}">${a.expectedReturn != null ? fmt(a.expectedReturn, 2) + '%' : '—'}</td>
+        <td>${a.rsi != null ? fmt(a.rsi, 1) : '—'}</td>
+        <td style="font-size:0.8em;max-width:300px">${a.reason || '—'}</td>
+      </tr>`;
+    }).join('');
+  } catch (err) {
+    document.querySelector('#today-table tbody').innerHTML =
+      `<tr><td colspan="9" style="color:var(--red)">${err.message}</td></tr>`;
+  }
 }
 
 // ============================================================
@@ -1216,6 +1256,8 @@ setInterval(() => {
     loadDashSignal();
     loadDashWorker();
     loadInstrumentsTable();
+  } else if (activeView?.id === 'view-today') {
+    loadToday();
   }
 }, 60000);
 
