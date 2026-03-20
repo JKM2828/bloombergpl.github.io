@@ -2,7 +2,9 @@
 // GPW Bloomberg AI v2.0 – Frontend Application
 // ============================================================
 
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'http://localhost:3001/api'
+  : 'https://bloomberpl.herokuapp.com/api';
 
 // ---- Navigation ----
 document.querySelectorAll('.nav-btn').forEach((btn) => {

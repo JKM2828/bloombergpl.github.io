@@ -4,6 +4,8 @@
   "private": true,
   "description": "Bloomberg-style analytics platform for GPW (Warsaw Stock Exchange)",
   "scripts": {
+    "start": "node apps/api/src/index.js",
+    "heroku-postbuild": "cd apps/api && npm install",
     "install:all": "cd packages/shared && npm install && cd ../../apps/api && npm install && cd ../../apps/web && npm install",
     "dev:api": "cd apps/api && npm run dev",
     "dev:web": "cd apps/web && npm run dev",
@@ -15,6 +17,9 @@
     "test": "cd apps/api && npm test",
     "seed": "cd apps/api && npm run seed",
     "migrate": "cd apps/api && npm run migrate"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "keywords": [
     "gpw",
