@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPW Bloomberg – AI Analiza Rynku</title>
+  <!-- Lightweight Chart Library -->
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+  <!-- Lucide Icons (Shadcn-compatible) -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- DISCLAIMER BAR -->
+  <div id="disclaimer">
+    <i data-lucide="alert-triangle" class="icon-inline"></i>
+    Dane wyłącznie informacyjne. Prognozy ML nie stanowią porady inwestycyjnej. Inwestowanie wiąże się z ryzykiem utraty kapitału.
+  </div>
+
+  <!-- HEADER -->
+  <header>
+    <div class="logo"><i data-lucide="bar-chart-3" class="icon-logo"></i> GPW Bloomberg <span class="version-tag">AI v2.0</span> <span class="data-source-badge"><i data-lucide="database" class="icon-inline"></i> GPW API + Stooq EOD</span></div>
+    <nav>
+      <button class="nav-btn active" data-view="dashboard"><i data-lucide="layout-dashboard"></i> Dashboard</button>
+      <button class="nav-btn" data-view="predictions"><i data-lucide="brain"></i> Predykcje</button>
+      <button class="nav-btn" data-view="signals"><i data-lucide="radio"></i> Sygnały</button>
+      <button class="nav-btn" data-view="screener"><i data-lucide="scan-search"></i> Screener</button>
+      <button class="nav-btn" data-view="chart"><i data-lucide="candlestick-chart"></i> Wykres</button>
+      <button class="nav-btn" data-view="portfolio"><i data-lucide="wallet"></i> Portfel</button>
+      <button class="nav-btn" data-view="risk"><i data-lucide="shield-alert"></i> Ryzyko</button>
+      <button class="nav-btn" data-view="worker"><i data-lucide="refresh-cw"></i> Worker</button>
+      <button class="nav-btn" data-view="health"><i data-lucide="activity"></i> Status</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ============ DASHBOARD VIEW ============ -->
+    <section id="view-dashboard" class="view active">
+      <h2>Przegląd rynku GPW</h2>
+
+      <!-- LIVE TOP SYGNAŁY -->
+      <div class="card ai-card" style="border:1px solid var(--green);margin-bottom:16px">
+        <h3><i data-lucide="zap" class="icon-inline"></i> Live Top Sygnały <span style="font-size:0.7em;color:var(--text-muted);font-weight:normal">(quality-gated)</span></h3>
+        <div id="live-signals">Ładowanie sygnałów...</div>
+      </div>
+
+      <div class="grid-3">
+        <div class="card">
+          <h3><i data-lucide="trending-up" class="icon-inline"></i> TOP 5 wg score</h3>
+          <p id="ranking-timestamp" style="font-size:0.75em;color:var(--text-muted);margin:0 0 6px"></p>
+          <div id="top5-list" class="ranking-list">Ładowanie...</div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="trending-down" class="icon-inline"></i> BOTTOM 5 wg score</h3>
+          <div id="bottom5-list" class="ranking-list">Ładowanie...</div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="server" class="icon-inline"></i> Status systemu</h3>
+          <div id="system-status">Ładowanie...</div>
+        </div>
+      </div>
+
+      <div class="grid-3 mt">
+        <div class="card ai-card">
+          <h3><i data-lucide="brain" class="icon-inline"></i> Top predykcja AI</h3>
+          <div id="dash-top-prediction">Uruchom pipeline ML, aby zobaczyć predykcje.</div>
+        </div>
+        <div class="card ai-card">
+          <h3><i data-lucide="radio" class="icon-inline"></i> Ostatni sygnał</h3>
+          <div id="dash-top-signal">Brak sygnałów — uruchom predykcje.</div>
+        </div>
+        <div class="card ai-card">
+          <h3><i data-lucide="refresh-cw" class="icon-inline"></i> Worker</h3>
+          <div id="dash-worker-status">Ładowanie...</div>
+        </div>
+      </div>
+
+      <div class="card mt">
+        <h3>Wszystkie instrumenty</h3>
+        <div class="filter-bar">
+          <button class="filter-btn active" data-type="">Wszystkie</button>
+          <button class="filter-btn" data-type="STOCK">Akcje</button>
+          <button class="filter-btn" data-type="ETF">ETF</button>
+          <button class="filter-btn" data-type="INDEX">Indeksy</button>
+          <button class="filter-btn" data-type="FUTURES">Kontrakty</button>
+        </div>
+        <table id="instruments-table">
+          <thead>
+            <tr><th>Ticker</th><th>Nazwa</th><th>Sektor</th><th>Typ</th><th>Cena</th><th>Akcja</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ PREDICTIONS VIEW ============ -->
+    <section id="view-predictions" class="view">
+      <h2><i data-lucide="brain" class="icon-inline"></i> Predykcje ML – Prognoza inwestycyjna</h2>
+      <div class="disclaimer-box">
+        Prognozy generowane przez model uczenia maszynowego (sieć neuronowa + ensemble). Wyniki nie gwarantują przyszłych zysków. 
+        Nie stanowią rekomendacji inwestycyjnej w rozumieniu prawa.
+      </div>
+      <div class="toolbar">
+        <button id="btn-run-pipeline" class="btn-primary"><i data-lucide="play" class="icon-inline"></i> Uruchom pełny pipeline</button>
+        <button id="btn-run-predictions" class="btn-primary"><i data-lucide="brain" class="icon-inline"></i> Generuj predykcje</button>
+        <button id="btn-train-models" class="btn-secondary"><i data-lucide="cpu" class="icon-inline"></i> Trenuj modele</button>
+        <span id="prediction-status"></span>
+      </div>
+      <div class="grid-3 mt" id="prediction-summary"></div>
+      <table id="predictions-table" class="mt">
+        <thead>
+          <tr>
+            <th>#</th><th>Ticker</th><th>Nazwa</th><th>Cena</th><th>Kierunek</th><th>Pewność</th>
+            <th>Oczekiwany zwrot</th><th>Bull %</th><th>Base %</th><th>Bear %</th>
+            <th style="color:var(--green)">Cel Bull</th><th>Cel Base</th><th style="color:var(--red)">Cel Bear</th>
+            <th>RSI</th><th>MACD</th><th>Reżim</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- ============ SIGNALS VIEW ============ -->
+    <section id="view-signals" class="view">
+      <h2><i data-lucide="radio" class="icon-inline"></i> Sygnały inwestycyjne</h2>
+      <div class="disclaimer-box">
+        Sygnały AI łączą prognozy ML z analizą ryzyka i wielkością pozycji (Kelly criterion). 
+        Podane poziomy stop-loss i take-profit są orientacyjne. To NIE jest rekomendacja zakupu.
+      </div>
+      <table id="signals-table">
+        <thead>
+          <tr>
+            <th>#</th><th>Ticker</th><th>Cena</th><th>Kierunek</th><th>Pewność</th><th>Oczek. zwrot</th>
+            <th>Ryzyko</th><th>Wielkość poz.</th><th>Stop Loss</th><th>Take Profit</th>
+            <th>Trzymaj</th><th>Model</th><th>Data</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- ============ SCREENER VIEW ============ -->
+    <section id="view-screener" class="view">
+      <h2><i data-lucide="scan-search" class="icon-inline"></i> Screener – Ranking spółek</h2>
+      <div class="toolbar">
+        <button id="btn-run-screener" class="btn-primary"><i data-lucide="refresh-cw" class="icon-inline"></i> Przelicz ranking</button>
+        <span id="screener-status"></span>
+      </div>
+      <table id="ranking-table">
+        <thead>
+          <tr>
+            <th>#</th><th>Ticker</th><th>Nazwa</th><th>Typ</th><th>Cena</th><th>Score</th>
+            <th>1M %</th><th>3M %</th><th>RSI</th><th>Vol %</th><th>DD %</th>
+            <th>Sygnał</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- ============ CHART VIEW ============ -->
+    <section id="view-chart" class="view">
+      <h2><i data-lucide="candlestick-chart" class="icon-inline"></i> Wykres cenowy</h2>
+      <div class="toolbar">
+        <select id="chart-ticker"></select>
+        <select id="chart-timeframe">
+          <option value="1d" selected>Dzienny (1D)</option>
+          <option value="1h">Godzinowy (1H)</option>
+          <option value="5m">5-minutowy (5M) – Live</option>
+        </select>
+        <button id="btn-load-chart" class="btn-primary"><i data-lucide="line-chart" class="icon-inline"></i> Załaduj wykres</button>
+        <label style="display:inline-flex;align-items:center;gap:4px;font-size:0.85em;color:var(--text-muted);margin-left:8px">
+          <input type="checkbox" id="chart-auto-refresh"> Auto-odświeżanie
+        </label>
+        <span id="chart-live-status" style="font-size:0.8em;margin-left:8px"></span>
+        <span id="chart-freshness" class="freshness-label"></span>
+      </div>
+      <div class="card">
+        <div id="chart-container" style="height: 500px;"></div>
+      </div>
+      <div class="grid-3 mt" id="chart-indicators"></div>
+      <div class="card mt ai-card" id="chart-prediction">
+        <h3><i data-lucide="brain" class="icon-inline"></i> Predykcja AI dla wybranego instrumentu</h3>
+        <div id="chart-pred-content">Wybierz instrument i załaduj wykres, aby zobaczyć predykcję.</div>
+      </div>
+    </section>
+
+    <!-- ============ PORTFOLIO VIEW ============ -->
+    <section id="view-portfolio" class="view">
+      <h2><i data-lucide="wallet" class="icon-inline"></i> Portfel symulacyjny</h2>
+      <div class="grid-3">
+        <div class="card">
+          <h3><i data-lucide="banknote" class="icon-inline"></i> Saldo</h3>
+          <div id="portfolio-balance" class="big-number">0 PLN</div>
+          <div class="form-row">
+            <input id="deposit-amount" type="number" placeholder="Kwota PLN" min="0" />
+            <button id="btn-deposit" class="btn-primary">Wpłać</button>
+            <button id="btn-withdraw" class="btn-danger">Wypłać</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="shopping-cart" class="icon-inline"></i> Kup / Sprzedaj</h3>
+          <div class="form-row">
+            <select id="trade-ticker"></select>
+            <input id="trade-shares" type="number" placeholder="Ilość" min="1" />
+            <button id="btn-buy" class="btn-primary">Kup</button>
+            <button id="btn-sell" class="btn-danger">Sprzedaj</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="bar-chart-2" class="icon-inline"></i> P&L Portfela</h3>
+          <div id="portfolio-pnl" class="big-number">—</div>
+        </div>
+      </div>
+      <div class="card mt">
+        <h3>Otwarte pozycje</h3>
+        <table id="positions-table">
+          <thead>
+            <tr><th>Ticker</th><th>Ilość</th><th>Śr. cena</th><th>Akt. cena</th><th>Wartość</th><th>P&L</th><th>P&L %</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card mt">
+        <h3>Historia transakcji</h3>
+        <table id="transactions-table">
+          <thead>
+            <tr><th>Data</th><th>Typ</th><th>Ticker</th><th>Ilość</th><th>Cena</th><th>Kwota</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ RISK VIEW ============ -->
+    <section id="view-risk" class="view">
+      <h2><i data-lucide="shield-alert" class="icon-inline"></i> Analiza ryzyka portfela</h2>
+      <div class="grid-3" id="risk-overview">
+        <div class="card">
+          <h3><i data-lucide="percent" class="icon-inline"></i> Ekspozycja</h3>
+          <div id="risk-exposure" class="big-number">—</div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="target" class="icon-inline"></i> Koncentracja</h3>
+          <div id="risk-concentration" class="big-number">—</div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="briefcase" class="icon-inline"></i> Pozycje otwarte</h3>
+          <div id="risk-positions" class="big-number">—</div>
+        </div>
+      </div>
+      <div class="card mt">
+        <h3>Ryzyko per pozycja</h3>
+        <table id="risk-positions-table">
+          <thead>
+            <tr><th>Ticker</th><th>Wartość</th><th>% portfela</th><th>P&L %</th><th>Stop Loss</th><th>Take Profit</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card mt">
+        <h3>Limity ryzyka</h3>
+        <div id="risk-limits"></div>
+      </div>
+    </section>
+
+    <!-- ============ WORKER VIEW ============ -->
+    <section id="view-worker" class="view">
+      <h2><i data-lucide="refresh-cw" class="icon-inline"></i> Worker 24/7 – Kolejka zadań</h2>
+      <div class="grid-3">
+        <div class="card">
+          <h3>Status workera</h3>
+          <div id="worker-info">Ładowanie...</div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="settings" class="icon-inline"></i> Akcje</h3>
+          <button id="btn-enqueue-pipeline" class="btn-primary"><i data-lucide="play" class="icon-inline"></i> Uruchom full pipeline</button>
+          <button id="btn-enqueue-ingest" class="btn-secondary mt-sm"><i data-lucide="download" class="icon-inline"></i> Enqueue ingest</button>
+          <button id="btn-enqueue-train" class="btn-secondary mt-sm"><i data-lucide="cpu" class="icon-inline"></i> Enqueue training</button>
+          <button id="btn-drain-queue" class="btn-primary mt-sm"><i data-lucide="zap" class="icon-inline"></i> Drain queue</button>
+          <div id="worker-action-status" class="mt-sm"></div>
+        </div>
+        <div class="card">
+          <h3>Statystyki</h3>
+          <div id="worker-stats">Ładowanie...</div>
+        </div>
+      </div>
+      <div class="card mt">
+        <h3>Ostatnie zadania</h3>
+        <table id="jobs-table">
+          <thead>
+            <tr><th>ID</th><th>Typ</th><th>Status</th><th>Utworzone</th><th>Zakończone</th><th>Retries</th><th>Błąd</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ HEALTH VIEW ============ -->
+    <section id="view-health" class="view">
+      <h2><i data-lucide="activity" class="icon-inline"></i> Status systemu & dane</h2>
+      <div class="grid-3">
+        <div class="card" id="health-info">Ładowanie...</div>
+        <div class="card">
+          <h3><i data-lucide="settings" class="icon-inline"></i> Operacje</h3>
+          <button id="btn-ingest-full" class="btn-primary"><i data-lucide="download" class="icon-inline"></i> Pobierz wszystkie dane</button>
+          <button id="btn-ingest-incr" class="btn-primary mt-sm"><i data-lucide="download" class="icon-inline"></i> Aktualizuj (30 dni)</button>
+          <button id="btn-compute-features" class="btn-secondary mt-sm"><i data-lucide="calculator" class="icon-inline"></i> Oblicz cechy ML</button>
+          <div id="ingest-status" class="mt-sm"></div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="file-text" class="icon-inline"></i> Logi ingest</h3>
+          <div id="ingest-logs" style="max-height:300px;overflow:auto;font-size:0.85em;"></div>
+        </div>
+      </div>
+      <div class="card mt">
+        <h3><i data-lucide="scroll-text" class="icon-inline"></i> Audit log</h3>
+        <div id="audit-logs" style="max-height:300px;overflow:auto;font-size:0.85em;"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>GPW Bloomberg AI v2.0 · Dane ze Stooq · ML: Neural Network + ensemble · Tylko do celów edukacyjnych i informacyjnych</p>
+    <p style="font-size:0.7em;margin-top:4px">Wyniki modelu predykcyjnego nie gwarantują przyszłych zysków. Inwestowanie wiąże się z ryzykiem.</p>
+  </footer>
+
+  <script src="app.js"></script>
+  <script>lucide.createIcons();</script>
+</body>
+</html>
