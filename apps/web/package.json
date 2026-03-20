@@ -1,0 +1,11 @@
+{
+  "name": "@gpw/web",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "npx http-server public -p 3000 -c-1 --cors",
+    "build": "echo web ready"
+  },
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  }
+}

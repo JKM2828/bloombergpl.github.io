@@ -1,0 +1,102 @@
+// ============================================================
+// GPW Bloomberg – API Server entry point (v2 with ML + Worker + Live)
+// ============================================================
+require('dotenv').config({ path: require('path').resolve(__dirname, '..', '..', '..', '.env') });
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const http = require('http');
+const { initDb, startAutoSave } = require('./db/connection');
+const { migrate } = require('./db/migrate');
+const { seed } = require('./db/seed');
+const routes = require('./routes');
+const { startScheduler } = require('./worker/jobWorker');
+const { loadModelsFromDb } = require('./ml/mlEngine');
+const { attachWebSocket } = require('./ws/liveCandles');
+
+const PORT = process.env.PORT || 3001;
+const app = express();
+
+// ---- Middleware ----
+app.use(cors({ origin: '*' }));
+app.use(express.json());
+
+// Request logging
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms`);
+  });
+  next();
+});
+
+// ---- Disclaimer middleware – adds header ----
+app.use((req, res, next) => {
+  res.setHeader('X-Disclaimer',
+    'Dane informacyjne. Nie stanowia porady inwestycyjnej. Inwestowanie wiaze sie z ryzykiem.');
+  next();
+});
+
+// ---- Routes ----
+app.use('/api', routes);
+
+// ---- Serve frontend (static files from apps/web/public) ----
+const webPublicDir = path.join(__dirname, '..', '..', 'web', 'public');
+app.use(express.static(webPublicDir));
+// SPA fallback: return index.html for non-API routes
+app.get(/^\/(?!api).*/, (req, res) => {
+  res.sendFile(path.join(webPublicDir, 'index.html'));
+});
+
+// Root
+app.get('/', (req, res) => {
+  res.json({
+    name: 'GPW Bloomberg API',
+    version: '2.0.0',
+    disclaimer: 'Dane wyłącznie informacyjne. Nie stanowią porady inwestycyjnej.',
+    endpoints: {
+      instruments: '/api/instruments',
+      candles: '/api/candles/:ticker',
+      ranking: '/api/ranking',
+      predictions: '/api/predictions',
+      signals: '/api/signals',
+      ml: '/api/ml/*',
+      risk: '/api/risk/*',
+      portfolio: '/api/portfolio/*',
+      worker: '/api/worker/status',
+      pipeline: '/api/pipeline/run',
+      audit: '/api/audit',
+      health: '/api/health',
+      ingest: '/api/ingest/*',
+    },
+  });
+});
+
+// ---- Init DB & start ----
+(async () => {
+  await migrate();
+  await seed();
+  startAutoSave();
+
+  const server = http.createServer(app);
+
+  // Attach WebSocket live feed (ws://localhost:PORT/ws/live?ticker=PKN&tf=5m)
+  attachWebSocket(server);
+
+  server.listen(PORT, () => {
+    console.log(`\n🚀 GPW Bloomberg API v2.0 running on http://localhost:${PORT}`);
+    console.log('   ML + Risk + Worker engine active');
+    console.log('   WebSocket live feed: ws://localhost:' + PORT + '/ws/live?ticker=TICKER&tf=5m');
+    console.log('   Endpoints: /api/predictions, /api/signals, /api/risk/*, /api/worker/*');
+    console.log('   Health: /api/health\n');
+  });
+
+  // Load previously trained ML models from DB
+  loadModelsFromDb();
+
+  // Start the 24/7 background worker scheduler
+  startScheduler();
+})();
+
+module.exports = app;

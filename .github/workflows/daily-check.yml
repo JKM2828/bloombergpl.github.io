@@ -1,0 +1,91 @@
+name: GPW Daily Quality Check
+
+on:
+  schedule:
+    # Post-market: 18:30 CET (16:30 UTC) on weekdays
+    - cron: '30 16 * * 1-5'
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install --prefix apps/api
+      - name: Run unit tests
+        run: cd apps/api && npm test
+
+  quality-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --prefix apps/api
+
+      - name: Smoke test — modules load without errors
+        run: |
+          node -e "
+            require('./apps/api/src/data/sectors');
+            require('./apps/api/src/ingest/feedMonitor');
+            require('./apps/api/src/ml/featureEngineering');
+            require('./apps/api/src/ml/riskEngine');
+            require('./apps/api/src/ml/backtest');
+            require('./apps/api/src/screener/rankingService');
+            console.log('All modules loaded OK');
+          "
+
+      - name: Run data quality check
+        run: |
+          node -e "
+            const { initDb } = require('./apps/api/src/db/connection');
+            initDb();
+            const { assessAllFeedQuality } = require('./apps/api/src/ingest/feedMonitor');
+            const report = assessAllFeedQuality();
+            console.log('=== Feed Quality Report ===');
+            console.log('Total instruments:', report.totalInstruments);
+            console.log('Healthy:', report.healthy);
+            console.log('Degraded:', report.degraded);
+            console.log('Missing:', report.missing);
+            console.log('Health %:', report.healthPct);
+            if (report.details.length > 0) {
+              console.log('\n--- Issues ---');
+              for (const d of report.details.slice(0, 10)) {
+                console.log(d.ticker, ':', d.daily.issues.join(', '));
+              }
+            }
+            if (report.healthPct < 50) {
+              console.error('CRITICAL: Feed health below 50%!');
+              process.exit(1);
+            }
+          "
+
+      - name: Verify ML models exist
+        run: |
+          node -e "
+            const { initDb } = require('./apps/api/src/db/connection');
+            const { query } = require('./apps/api/src/db/connection');
+            initDb();
+            const models = query(\"SELECT COUNT(*) as n FROM model_registry WHERE status = 'active'\");
+            const n = models[0]?.n || 0;
+            console.log('Active ML models:', n);
+            if (n === 0) {
+              console.warn('WARNING: No active ML models found');
+            }
+          "

@@ -1,0 +1,29 @@
+{
+  "name": "gpw-bloomberg",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bloomberg-style analytics platform for GPW (Warsaw Stock Exchange)",
+  "scripts": {
+    "install:all": "cd packages/shared && npm install && cd ../../apps/api && npm install && cd ../../apps/web && npm install",
+    "dev:api": "cd apps/api && npm run dev",
+    "dev:web": "cd apps/web && npm run dev",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "build:shared": "cd packages/shared && npm run build",
+    "build:api": "cd apps/api && npm run build",
+    "build:web": "cd apps/web && npm run build",
+    "build": "npm run build:shared && npm run build:api && npm run build:web",
+    "test": "cd apps/api && npm test",
+    "seed": "cd apps/api && npm run seed",
+    "migrate": "cd apps/api && npm run migrate"
+  },
+  "keywords": [
+    "gpw",
+    "stock-market",
+    "analytics",
+    "stooq"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
