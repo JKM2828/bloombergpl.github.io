@@ -95,6 +95,7 @@ const STOOQ_TICKER_MAP = {
   BLOOBER:      'blo',
   BNPPPL:       'bnp',
   BOGDANKA:     'lwb',
+  BOS:           'bos',
   BORYSZEW:     'brs',
   BUDIMEX:      'bdx',
   BUMECH:       'bmc',

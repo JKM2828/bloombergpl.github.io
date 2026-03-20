@@ -73,6 +73,11 @@ app.get('/', (req, res) => {
   });
 });
 
+// ---- Keepalive endpoint (for UptimeRobot / cron-job.org) ----
+app.get('/keepalive', (req, res) => {
+  res.status(200).json({ status: 'alive', uptime: process.uptime() | 0 });
+});
+
 // ---- Init DB & start ----
 (async () => {
   await migrate();
@@ -97,6 +102,19 @@ app.get('/', (req, res) => {
 
   // Start the 24/7 background worker scheduler
   startScheduler();
+
+  // ---- Auto-bootstrap: trigger initial ingest + analysis on fresh start ----
+  const { enqueueJob, drainQueue } = require('./worker/jobWorker');
+  const { queryOne: qo } = require('./db/connection');
+  const lastIngest = (qo("SELECT MAX(created_at) as d FROM ingest_log WHERE status = 'ok'") || {}).d;
+  const hoursSinceIngest = lastIngest ? (Date.now() - new Date(lastIngest).getTime()) / 3600000 : 9999;
+  if (hoursSinceIngest > 1) {
+    console.log(`[bootstrap] Last ingest ${lastIngest ? Math.round(hoursSinceIngest) + 'h ago' : 'never'} — auto-starting pipeline...`);
+    enqueueJob('full_pipeline', {}, 1);
+    drainQueue().catch(err => console.error('[bootstrap] Pipeline error:', err.message));
+  } else {
+    console.log(`[bootstrap] Data fresh (${Math.round(hoursSinceIngest * 60)}min old) — skipping auto-ingest.`);
+  }
 })();
 
 module.exports = app;

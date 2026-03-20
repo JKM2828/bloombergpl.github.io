@@ -255,6 +255,94 @@ router.get('/picks/performance', (req, res) => {
   res.json({ count: performance.length, days, performance });
 });
 
+// ============================================================
+// Sygnały Dnia – "Co kupić / co sprzedać dzisiaj"
+// Unified BUY/SELL/HOLD view for all analyzed instruments
+// ============================================================
+router.get('/today', (req, res) => {
+  const limit = parseInt(req.query.limit) || 30;
+
+  // 1. Get all signals (ML-based BUY/SELL)
+  const signals = getLatestSignals(100);
+
+  // 2. Get daily picks (top BUY candidates)
+  const picksData = getDailyPicks({ limit: 10 });
+
+  // 3. Get sell candidates (portfolio positions to exit)
+  const sellCandidates = getSellCandidates();
+
+  // 4. Build unified action table
+  const actions = [];
+  const seen = new Set();
+
+  // BUY picks first (highest confidence)
+  for (const pick of picksData.picks) {
+    seen.add(pick.ticker);
+    actions.push({
+      ticker: pick.ticker,
+      name: pick.name,
+      type: pick.type,
+      sector: pick.sector,
+      action: 'KUP',
+      price: pick.metrics?.lastClose || null,
+      confidence: pick.ml?.confidence || null,
+      expectedReturn: pick.ml?.expectedReturn || null,
+      compositeScore: pick.compositeScore,
+      rsi: pick.metrics?.rsi14 || null,
+      reason: pick.reasons || '',
+    });
+  }
+
+  // SELL candidates (portfolio positions)
+  for (const sell of sellCandidates) {
+    seen.add(sell.ticker);
+    const inst = queryOne('SELECT name, type FROM instruments WHERE ticker = ?', [sell.ticker]);
+    actions.push({
+      ticker: sell.ticker,
+      name: inst?.name || sell.ticker,
+      type: inst?.type || 'STOCK',
+      sector: null,
+      action: sell.action === 'SELL' ? 'SPRZEDAJ' : sell.action === 'PARTIAL_SELL' ? 'CZĘŚCIOWO SPRZEDAJ' : 'ROZWAŻ SPRZEDAŻ',
+      price: sell.currentPrice,
+      confidence: null,
+      expectedReturn: sell.pnlPct,
+      compositeScore: null,
+      rsi: null,
+      reason: sell.sellReasons.join('; '),
+    });
+  }
+
+  // SELL signals from ML (not already in picks/sell candidates)
+  for (const sig of signals) {
+    if (seen.has(sig.ticker)) continue;
+    const direction = sig.direction || (sig.details ? JSON.parse(sig.details).direction : null);
+    if (!direction) continue;
+    seen.add(sig.ticker);
+    const details = sig.details ? JSON.parse(sig.details) : {};
+    actions.push({
+      ticker: sig.ticker,
+      name: sig.name || sig.ticker,
+      type: sig.type || 'STOCK',
+      sector: null,
+      action: direction === 'BUY' ? 'KUP' : direction === 'SELL' ? 'SPRZEDAJ' : 'TRZYMAJ',
+      price: sig.lastClose || null,
+      confidence: details.confidence || null,
+      expectedReturn: details.expectedReturnPct || null,
+      compositeScore: null,
+      rsi: details.rsi14 || null,
+      reason: sig.reason || details.reason || '',
+    });
+  }
+
+  res.json({
+    date: new Date().toISOString().slice(0, 10),
+    regime: picksData.regime,
+    count: actions.length,
+    actions: actions.slice(0, limit),
+    disclaimer: 'Sygnały dnia — analiza algorytmiczna, nie stanowi porady inwestycyjnej. Inwestowanie wiąże się z ryzykiem.',
+  });
+});
+
 router.post('/picks/validate', (req, res) => {
   try {
     const validated = validatePastPicks();
