@@ -4,7 +4,7 @@
 
 const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
   ? 'http://localhost:3001/api'
-  : 'https://bloomberpl.herokuapp.com/api';
+  : '/api';
 
 // ---- Navigation ----
 document.querySelectorAll('.nav-btn').forEach((btn) => {
