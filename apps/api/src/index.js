@@ -38,6 +38,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// ---- Keepalive endpoint (for UptimeRobot / cron-job.org) ----
+app.get('/keepalive', (req, res) => {
+  res.status(200).json({ status: 'alive', uptime: process.uptime() | 0 });
+});
+
 // ---- Routes ----
 app.use('/api', routes);
 
@@ -71,11 +76,6 @@ app.get('/', (req, res) => {
       ingest: '/api/ingest/*',
     },
   });
-});
-
-// ---- Keepalive endpoint (for UptimeRobot / cron-job.org) ----
-app.get('/keepalive', (req, res) => {
-  res.status(200).json({ status: 'alive', uptime: process.uptime() | 0 });
 });
 
 // ---- Init DB & start ----
