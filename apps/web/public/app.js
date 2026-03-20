@@ -6,6 +6,8 @@ const API = (window.location.hostname === 'localhost' || window.location.hostnam
   ? 'http://localhost:3001/api'
   : '/api';
 
+const PROD_WS_ORIGIN = 'wss://bloomberpl-da6e13c64b4e.herokuapp.com';
+
 // ---- Navigation ----
 document.querySelectorAll('.nav-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -509,10 +511,10 @@ let wsReconnectTimer = null;
 const WS_RECONNECT_DELAY_MS = 5000;
 
 function getWsUrl() {
-  const loc = window.location;
-  const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = loc.hostname + ':' + (loc.port || (loc.protocol === 'https:' ? '443' : '80'));
-  return `${proto}//${host}`;
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return 'ws://localhost:3001';
+  }
+  return PROD_WS_ORIGIN;
 }
 
 function updateLiveStatus(state) {
