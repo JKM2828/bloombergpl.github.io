@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://bloomberpl-da6e13c64b4e.herokuapp.com/api/:path*"
+    }
+  ]
+}
