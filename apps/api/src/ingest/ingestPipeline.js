@@ -464,12 +464,14 @@ async function ingestIntraday5m(maxTickers = 200) {
 
   let total = 0, errors = 0, fetched = 0;
 
-  // ---- Strategy 1: Try Stooq CSV intraday per-ticker ----
+  // ---- Strategy 1: Try Stooq CSV intraday per-ticker (first 3 only to test) ----
   if (gpwProvider.hasBudget()) {
     const dateTo = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const dateFrom = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
+    const probeLimit = 3; // Only probe a few tickers to check if CSV 5m data is available
 
-    for (const inst of instruments) {
+    for (let pi = 0; pi < Math.min(probeLimit, instruments.length); pi++) {
+      const inst = instruments[pi];
       try {
         const candles = await gpwProvider.fetchIntraday(inst.ticker, dateFrom, dateTo);
         if (!candles || candles.length === 0) continue;
@@ -491,12 +493,37 @@ async function ingestIntraday5m(maxTickers = 200) {
         }
         await sleep(200 + Math.floor(Math.random() * 200));
       } catch (err) {
-        if (err.code === 'GPW_RATE_LIMIT' || err.code === 'GPW_BUDGET_EXHAUSTED') {
-          console.warn('[intraday-5m] Rate-limited on CSV — switching to batch quotes fallback.');
-          break;
-        }
+        if (err.code === 'GPW_RATE_LIMIT' || err.code === 'GPW_BUDGET_EXHAUSTED') break;
         if (err.code === 'GPW_NO_KEY') break;
         errors++;
+      }
+    }
+
+    // If probe succeeded, fetch remaining tickers
+    if (fetched > 0) {
+      for (let pi = probeLimit; pi < instruments.length; pi++) {
+        const inst = instruments[pi];
+        try {
+          const candles = await gpwProvider.fetchIntraday(inst.ticker, dateFrom, dateTo);
+          if (!candles || candles.length === 0) continue;
+          const valid = validateCandles(candles);
+          let inserted = 0;
+          for (const c of valid) {
+            const changed = run(
+              `INSERT OR REPLACE INTO candles (ticker, date, open, high, low, close, volume, provider, timeframe)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [inst.ticker, c.date, c.open, c.high, c.low, c.close, c.volume, 'gpw', '5m']
+            );
+            inserted += changed;
+          }
+          total += inserted;
+          fetched++;
+          await sleep(200 + Math.floor(Math.random() * 200));
+        } catch (err) {
+          if (err.code === 'GPW_RATE_LIMIT' || err.code === 'GPW_BUDGET_EXHAUSTED') break;
+          if (err.code === 'GPW_NO_KEY') break;
+          errors++;
+        }
       }
     }
   }
@@ -506,22 +533,26 @@ async function ingestIntraday5m(maxTickers = 200) {
   // to at least update the latest price for all tickers.
   if (fetched === 0) {
     console.log('[intraday-5m] CSV produced no data — using batch quote fallback for live prices...');
+    // Small delay to avoid Stooq rate-limit collision with concurrent ingest job
+    await sleep(2000);
     try {
       const allTickers = instruments.map(i => i.ticker);
       const quotes = await gpwProvider.fetchBatchQuotes(allTickers);
-      const now = new Date();
-      const dateStr = now.toISOString().slice(0, 10);
-      const timeStr = now.toISOString().slice(11, 16).replace(':', '');
-      const ts5m = `${dateStr} ${now.toISOString().slice(11, 16)}`;
+      const dateStr = new Date().toISOString().slice(0, 10);
+
+      console.log(`[intraday-5m] Batch quotes received: ${quotes.size}/${allTickers.length}`);
 
       for (const [ticker, candle] of quotes) {
         if (!candle || !candle.close || candle.close <= 0) continue;
+
+        // Use date-only format to match/replace existing daily candle
+        const candleDateOnly = (candle.date || dateStr).slice(0, 10);
 
         // Update the daily candle with the latest price
         const changed = run(
           `INSERT OR REPLACE INTO candles (ticker, date, open, high, low, close, volume, provider, timeframe)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [ticker, candle.date || dateStr, candle.open, candle.high, candle.low, candle.close, candle.volume, 'stooq-live', '1d']
+          [ticker, candleDateOnly, candle.open, candle.high, candle.low, candle.close, candle.volume, 'stooq-live', '1d']
         );
         total += changed;
         if (changed > 0) fetched++;
