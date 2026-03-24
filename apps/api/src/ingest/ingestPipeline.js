@@ -45,8 +45,9 @@ let lastCycleStats = null;
 function getLastCycleStats() { return lastCycleStats; }
 
 /**
- * Check if a ticker already has fresh data (last candle = yesterday or today).
- * Provider-agnostic — checks ALL providers for freshness.
+ * Check if a ticker already has fresh data.
+ * During GPW market hours (Mon-Fri 9-17 Warsaw): only fresh if updated within last 20 min.
+ * Outside market hours: fresh if last candle is from today or last trading day.
  */
 function isTickerFresh(ticker) {
   const row = queryOne(
@@ -56,6 +57,14 @@ function isTickerFresh(ticker) {
   if (!row || !row.date) return false;
   const lastDate = new Date(row.date);
   const now = new Date();
+
+  // During market hours, require data from within last 20 minutes
+  if (isMarketHours(now)) {
+    const diffMs = now - lastDate;
+    return diffMs < 20 * 60 * 1000; // 20 minutes
+  }
+
+  // Outside market hours: use calendar-day logic
   const diffDays = Math.floor((now - lastDate) / 86400000);
   if (diffDays <= 0) return true;
   if (diffDays === 1) return true;
@@ -64,6 +73,24 @@ function isTickerFresh(ticker) {
   if (dow === 0 && diffDays <= 2) return true;
   if (dow === 1 && diffDays <= 3) return true;
   return false;
+}
+
+/**
+ * Check if current time is within GPW market hours (Mon-Fri 9:00-17:30 Warsaw).
+ */
+function isMarketHours(now) {
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const jan = new Date(now.getFullYear(), 0, 1).getTimezoneOffset();
+  const jul = new Date(now.getFullYear(), 6, 1).getTimezoneOffset();
+  const isDST = now.getTimezoneOffset() < Math.max(jan, jul);
+  const warsawOffset = isDST ? 2 : 1;
+  const warsaw = new Date(utc + warsawOffset * 3600000);
+  const dow = warsaw.getDay();
+  if (dow === 0 || dow === 6) return false;
+  const h = warsaw.getHours();
+  const m = warsaw.getMinutes();
+  const minuteOfDay = h * 60 + m;
+  return minuteOfDay >= 9 * 60 && minuteOfDay < 17 * 60 + 30;
 }
 
 /**
@@ -200,15 +227,17 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
   }
 
   // Auto-deactivate tickers with repeated no-data (provider-agnostic)
+  // Requires 5 consecutive no-data attempts before deactivation.
   if (noDataTickers.length > 0) {
     for (const ticker of noDataTickers) {
-      const failCount = query(
-        'SELECT COUNT(*) as c FROM ingest_log WHERE ticker = ? AND rows_inserted = 0 ORDER BY created_at DESC LIMIT 3',
+      const recentLogs = query(
+        'SELECT rows_inserted FROM ingest_log WHERE ticker = ? ORDER BY created_at DESC LIMIT 5',
         [ticker]
       );
-      if ((failCount[0]?.c || 0) >= 3) {
+      // Only deactivate when we have at least 5 logged attempts AND all are no-data
+      if (recentLogs.length >= 5 && recentLogs.every(r => r.rows_inserted === 0)) {
         run('UPDATE instruments SET active = 0 WHERE ticker = ?', [ticker]);
-        console.warn(`[ingest] ${ticker}: auto-deactivated (no data after 3+ attempts)`);
+        console.warn(`[ingest] ${ticker}: auto-deactivated (no data after 5 consecutive attempts)`);
       }
     }
   }
@@ -418,11 +447,6 @@ async function ingestIntraday(maxTickers = 22) {
  * @returns {Object} ingest summary
  */
 async function ingestIntraday5m(maxTickers = 200) {
-  if (!gpwProvider.hasBudget()) {
-    console.warn('[intraday-5m] GPW budget exhausted — skipping.');
-    return { total: 0, fetched: 0, attempted: 0, errors: 0, timeframe: '5m' };
-  }
-
   // Select top liquid stocks + all futures + indices
   const instruments = query(`
     SELECT i.ticker, i.type FROM instruments i WHERE i.active = 1
@@ -438,43 +462,74 @@ async function ingestIntraday5m(maxTickers = 200) {
     ))
   `, [maxTickers]);
 
-  const dateTo = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const dateFrom = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
-
   let total = 0, errors = 0, fetched = 0;
 
-  for (const inst of instruments) {
-    try {
-      const candles = await gpwProvider.fetchIntraday(inst.ticker, dateFrom, dateTo);
-      if (!candles || candles.length === 0) continue;
+  // ---- Strategy 1: Try Stooq CSV intraday per-ticker ----
+  if (gpwProvider.hasBudget()) {
+    const dateTo = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const dateFrom = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
 
-      const valid = validateCandles(candles);
-      let inserted = 0;
-      for (const c of valid) {
+    for (const inst of instruments) {
+      try {
+        const candles = await gpwProvider.fetchIntraday(inst.ticker, dateFrom, dateTo);
+        if (!candles || candles.length === 0) continue;
+
+        const valid = validateCandles(candles);
+        let inserted = 0;
+        for (const c of valid) {
+          const changed = run(
+            `INSERT OR REPLACE INTO candles (ticker, date, open, high, low, close, volume, provider, timeframe)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [inst.ticker, c.date, c.open, c.high, c.low, c.close, c.volume, 'gpw', '5m']
+          );
+          inserted += changed;
+        }
+        total += inserted;
+        fetched++;
+        if (inserted > 0) {
+          console.log(`[intraday-5m] ${inst.ticker}: ${inserted} new 5m candles`);
+        }
+        await sleep(200 + Math.floor(Math.random() * 200));
+      } catch (err) {
+        if (err.code === 'GPW_RATE_LIMIT' || err.code === 'GPW_BUDGET_EXHAUSTED') {
+          console.warn('[intraday-5m] Rate-limited on CSV — switching to batch quotes fallback.');
+          break;
+        }
+        if (err.code === 'GPW_NO_KEY') break;
+        errors++;
+      }
+    }
+  }
+
+  // ---- Strategy 2: Fallback to Stooq JSON batch quotes ----
+  // If CSV intraday yielded nothing, use batch quotes (live snapshots)
+  // to at least update the latest price for all tickers.
+  if (fetched === 0) {
+    console.log('[intraday-5m] CSV produced no data — using batch quote fallback for live prices...');
+    try {
+      const allTickers = instruments.map(i => i.ticker);
+      const quotes = await gpwProvider.fetchBatchQuotes(allTickers);
+      const now = new Date();
+      const dateStr = now.toISOString().slice(0, 10);
+      const timeStr = now.toISOString().slice(11, 16).replace(':', '');
+      const ts5m = `${dateStr} ${now.toISOString().slice(11, 16)}`;
+
+      for (const [ticker, candle] of quotes) {
+        if (!candle || !candle.close || candle.close <= 0) continue;
+
+        // Update the daily candle with the latest price
         const changed = run(
           `INSERT OR REPLACE INTO candles (ticker, date, open, high, low, close, volume, provider, timeframe)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [inst.ticker, c.date, c.open, c.high, c.low, c.close, c.volume, 'gpw', '5m']
+          [ticker, candle.date || dateStr, candle.open, candle.high, candle.low, candle.close, candle.volume, 'stooq-live', '1d']
         );
-        inserted += changed;
+        total += changed;
+        if (changed > 0) fetched++;
       }
-      total += inserted;
-      fetched++;
-      if (inserted > 0) {
-        console.log(`[intraday-5m] ${inst.ticker}: ${inserted} new 5m candles`);
-      }
-      await sleep(200 + Math.floor(Math.random() * 200));
+      console.log(`[intraday-5m] Batch quote fallback: updated ${fetched}/${allTickers.length} tickers`);
     } catch (err) {
-      if (err.code === 'GPW_RATE_LIMIT' || err.code === 'GPW_BUDGET_EXHAUSTED') {
-        console.warn('[intraday-5m] GPW rate-limited — stopping.');
-        break;
-      }
-      if (err.code === 'GPW_NO_KEY') {
-        console.warn('[intraday-5m] GPW API key not configured — skipping.');
-        break;
-      }
+      console.warn(`[intraday-5m] Batch quote fallback failed: ${err.message}`);
       errors++;
-      console.warn(`[intraday-5m] ${inst.ticker}: ${err.message}`);
     }
   }
 

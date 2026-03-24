@@ -19,9 +19,48 @@ const { ingestIncremental, ingestAll, ingestIntraday5m, getLastCycleStats } = re
 const { computeAllFeatures } = require('../ml/featureEngineering');
 const { trainAll, predictAll } = require('../ml/mlEngine');
 const { generateAllSignals } = require('../ml/riskEngine');
-const { runScreener, getDailyPicks, saveDailyPicks, validatePastPicks } = require('../screener/rankingService');
+const { runScreener, getDailyPicks, saveDailyPicks, validatePastPicks, getPickStats } = require('../screener/rankingService');
 
 const TIMEZONE = 'Europe/Warsaw';
+
+// ============================================================
+// PRECISION KPI — tracks model quality over time
+// Auto-retrains when precision@1D drops below threshold.
+// ============================================================
+const PRECISION_RETRAIN_THRESHOLD = 45; // % — below this triggers emergency retrain
+const PRECISION_WARN_THRESHOLD = 55;    // % — warn but keep running
+let lastPrecisionCheck = null;
+
+/**
+ * Check current pick precision and log alerts.
+ * Returns { precision1D, status: 'ok'|'warn'|'critical', retrain: boolean }
+ */
+function checkPrecisionKPI() {
+  const stats = getPickStats(30);
+  if (!stats || stats.totalPicks < 5) {
+    return { precision1D: null, precision3D: null, totalPicks: stats?.totalPicks || 0, status: 'no_data', retrain: false };
+  }
+  const { precision1D, precision3D, totalPicks } = stats;
+  lastPrecisionCheck = { precision1D, precision3D, totalPicks, checkedAt: new Date().toISOString() };
+
+  let status = 'ok';
+  let retrain = false;
+  if (precision1D < PRECISION_RETRAIN_THRESHOLD) {
+    console.warn(`[precision-kpi] 🔴 CRITICAL: precision@1D=${precision1D}% (threshold: ${PRECISION_RETRAIN_THRESHOLD}%) — triggering emergency retrain`);
+    status = 'critical';
+    retrain = true;
+  } else if (precision1D < PRECISION_WARN_THRESHOLD) {
+    console.warn(`[precision-kpi] ⚠️  WARN: precision@1D=${precision1D}% (threshold: ${PRECISION_WARN_THRESHOLD}%) — model degrading`);
+    status = 'warn';
+  } else {
+    console.log(`[precision-kpi] ✅ OK: precision@1D=${precision1D}%, precision@3D=${precision3D}% (${totalPicks} picks)`);
+  }
+  return { precision1D, precision3D, totalPicks, status, retrain };
+}
+
+function getPrecisionKPI() {
+  return lastPrecisionCheck;
+}
 
 let isRunning = false;
 // Anti-overlap locks per job type
@@ -154,6 +193,18 @@ const processors = {
       validatePastPicks();
       stats.lastPicks = new Date().toISOString();
       console.log(`[worker] Daily picks: ${picksData.picks.map(p => p.ticker).join(', ')}`);
+
+      // Precision KPI check — auto-retrain if model quality drops below threshold
+      const kpi = checkPrecisionKPI();
+      if (kpi.retrain) {
+        const alreadyTraining = queryOne(
+          "SELECT 1 FROM jobs WHERE job_type = 'train' AND status IN ('pending','running')"
+        );
+        if (!alreadyTraining) {
+          enqueueJob('train', { reason: 'precision_kpi', precision1D: kpi.precision1D }, 2);
+          console.warn(`[worker] Emergency retrain enqueued (precision@1D=${kpi.precision1D}%)`);
+        }
+      }
     } else {
       console.log('[worker] Degraded mode — skipping screener & picks (coverage < 80%)');
     }
@@ -385,4 +436,5 @@ module.exports = {
   getWorkerStatus,
   processors,
   getCurrentMode,
+  getPrecisionKPI,
 };

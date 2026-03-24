@@ -13,7 +13,7 @@ const { computeAllFeatures, getLatestFeatures } = require('../ml/featureEngineer
 const { predictAll, getLatestPredictions, getLatestPrediction, trainAll } = require('../ml/mlEngine');
 const { backtestAll } = require('../ml/backtest');
 const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStopLevels, computeSellLevels, getSellCandidates, RISK_CONFIG } = require('../ml/riskEngine');
-const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode } = require('../worker/jobWorker');
+const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI } = require('../worker/jobWorker');
 const { getLastCycleStats } = require('../ingest/ingestPipeline');
 const { assessFeedQuality, assessAllFeedQuality } = require('../ingest/feedMonitor');
 
@@ -472,6 +472,7 @@ router.get('/health', async (req, res) => {
     lastIngest,
     providers,
     live: getLiveStats(),
+    precisionKPI: getPrecisionKPI(),
   });
 });
 
@@ -682,6 +683,7 @@ router.get('/status/24x7', (req, res) => {
     },
     budget: budgetStats,
     lastIngestCycle: lastCycle,
+    precisionKPI: getPrecisionKPI(),
     data: {
       activeInstruments: instrumentCount,
       totalCandles: candleCount,
@@ -703,6 +705,43 @@ router.get('/growth/daily', (req, res) => {
 router.get('/growth/weekly', (req, res) => {
   const report = getWeeklyGrowthReport();
   res.json(report);
+});
+
+// ============================================================
+// Precision KPI – model quality monitoring
+// Returns current precision@1D/3D with status and retrain flag.
+// Used by dashboard and alerts.
+// ============================================================
+router.get('/kpi/precision', (req, res) => {
+  const days = parseInt(req.query.days) || 30;
+  const stats = getPickStats(days);
+  const cached = getPrecisionKPI();
+
+  if (!stats || stats.totalPicks < 5) {
+    return res.json({
+      status: 'no_data',
+      message: `Niewystarczające dane (minimum 5 picks za ostatnie ${days} dni)`,
+      totalPicks: stats?.totalPicks || 0,
+      cached,
+      thresholds: { warn: 55, retrain: 45 },
+    });
+  }
+
+  const { precision1D, precision3D, totalPicks, avgReturn1D, avgReturn3D } = stats;
+  const status = precision1D < 45 ? 'critical' : precision1D < 55 ? 'warn' : 'ok';
+
+  res.json({
+    status,
+    precision1D,
+    precision3D,
+    totalPicks,
+    avgReturn1D,
+    avgReturn3D,
+    days,
+    cached,
+    thresholds: { warn: 55, retrain: 45 },
+    disclaimer: 'Wyniki historyczne nie gwarantują przyszłych wyników.',
+  });
 });
 
 // ============================================================

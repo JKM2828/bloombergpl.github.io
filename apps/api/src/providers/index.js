@@ -66,6 +66,59 @@ function cbIsOpen(providerName) {
   return false;
 }
 
+// ============================================================
+// EXPONENTIAL BACKOFF RETRY
+// Retries a provider call up to maxRetries times on transient errors.
+// Non-retryable codes (rate limits, no key) bypass immediately.
+// ============================================================
+const RETRY_NON_RETRYABLE = new Set([
+  'GPW_NO_KEY', 'GPW_BUDGET_EXHAUSTED',
+  'EODHD_NO_KEY', 'EODHD_BUDGET_EXHAUSTED', 'EODHD_UNSUPPORTED',
+  'STOOQ_RATE_LIMIT', 'YAHOO_UNSUPPORTED',
+]);
+
+async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (RETRY_NON_RETRYABLE.has(err.code)) throw err; // fast-fail
+      if (attempt < maxRetries) {
+        const delay = baseDelayMs * Math.pow(2, attempt); // 500ms, 1000ms
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// ============================================================
+// BUDGET EXHAUSTION ALERTS
+// Fires once per threshold crossing to avoid log spam.
+// ============================================================
+const budgetAlertState = { sentAt10Pct: false, sentAt0: false, lastResetDate: null };
+
+function checkBudgetAlerts() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (budgetAlertState.lastResetDate !== today) {
+    budgetAlertState.sentAt10Pct = false;
+    budgetAlertState.sentAt0 = false;
+    budgetAlertState.lastResetDate = today;
+  }
+  const remaining = globalBudgetRemaining();
+  const pct = remaining / GLOBAL_DAILY_LIMIT;
+  if (!budgetAlertState.sentAt10Pct && pct <= 0.10) {
+    console.warn(`[budget-alert] ⚠️  HTTP budget at 10%: ${remaining}/${GLOBAL_DAILY_LIMIT} remaining today`);
+    budgetAlertState.sentAt10Pct = true;
+  }
+  if (!budgetAlertState.sentAt0 && remaining <= 0) {
+    console.warn(`[budget-alert] 🔴 HTTP budget EXHAUSTED (${GLOBAL_DAILY_LIMIT} calls used) — all providers suspended until midnight`);
+    budgetAlertState.sentAt0 = true;
+  }
+}
+
 /**
  * Get aggregated budget/health stats for all providers.
  */
@@ -115,7 +168,8 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
   const isYahooCapable = !YAHOO_UNSUPPORTED_TICKERS.has(ticker);
   const isEodhdCapable = isEodhdAllowed(ticker);
 
-  // Global budget check
+  // Global budget check + alert
+  checkBudgetAlerts();
   if (globalBudgetRemaining() <= 0) {
     console.warn(`[provider] Global daily limit reached (${GLOBAL_DAILY_LIMIT}) — skipping all providers`);
     return { provider: 'multi', candles: [], budgetExhausted: true };
@@ -124,7 +178,7 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
   // 1. GPW API (primary — all instruments, daily + intraday)
   if (!cbIsOpen('gpw') && gpwProvider.hasBudget()) {
     try {
-      const candles = await gpwProvider.fetchCandles(ticker, dateFrom, dateTo);
+      const candles = await withRetry(() => gpwProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
       cbRecord('gpw', true);
       if (candles && candles.length > 0) {
@@ -142,7 +196,7 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
   // 2. Stooq JSON (1 call, today's candle only — best for freshness)
   if (!cbIsOpen('stooq-json')) {
     try {
-      const candles = await stooqJsonProvider.fetchCandles(ticker, dateFrom, dateTo);
+      const candles = await withRetry(() => stooqJsonProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
       cbRecord('stooq-json', true);
       if (candles && candles.length > 0) {
@@ -158,7 +212,7 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
   // 3. Stooq CSV (historical range)
   if (!cbIsOpen('stooq-csv')) {
     try {
-      const candles = await stooqProvider.fetchCandles(ticker, dateFrom, dateTo);
+      const candles = await withRetry(() => stooqProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
       cbRecord('stooq-csv', true);
       if (candles && candles.length > 0) {
@@ -178,7 +232,7 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
   // 4. EODHD (stocks, ETFs, indices — skip for futures)
   if (isEodhdCapable && !cbIsOpen('eodhd')) {
     try {
-      const candles = await eodhdProvider.fetchCandles(ticker, dateFrom, dateTo);
+      const candles = await withRetry(() => eodhdProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
       cbRecord('eodhd', true);
       if (candles && candles.length > 0) {
@@ -196,7 +250,7 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
   // 5. Yahoo Finance (stocks/ETFs only — skip for indices/futures)
   if (isYahooCapable && !cbIsOpen('yahoo')) {
     try {
-      const candles = await yahooProvider.fetchCandles(ticker, dateFrom, dateTo);
+      const candles = await withRetry(() => yahooProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
       cbRecord('yahoo', true);
       if (candles && candles.length > 0) {
