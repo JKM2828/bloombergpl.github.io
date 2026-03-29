@@ -122,13 +122,22 @@ async function loadLiveSignals() {
     if (picksData && picksData.picks && picksData.picks.length > 0) {
       const el = document.getElementById('live-signals');
       const gates = picksData.qualityGates || {};
+      const dataAgeSec = picksData.dataAgeSec || 0;
+      const dataAgeMin = Math.round(dataAgeSec / 60);
+      const staleWarning = dataAgeSec > 3600
+        ? `<div style="background:var(--red);color:#fff;padding:6px 12px;border-radius:6px;margin-bottom:8px;font-size:0.85em">⚠ Dane sprzed ${dataAgeMin} min — ranking może być nieaktualny</div>`
+        : dataAgeSec > 1800
+          ? `<div style="background:var(--yellow);color:#000;padding:6px 12px;border-radius:6px;margin-bottom:8px;font-size:0.85em">⏳ Dane sprzed ${dataAgeMin} min</div>`
+          : '';
       el.innerHTML = `
+        ${staleWarning}
         <div style="font-size:0.75em;color:var(--text-muted);margin-bottom:8px">
           Reżim: <strong>${picksData.regime}</strong> |
           Przeskanowano: ${picksData.totalScreened || '—'} |
           Przeszło filtry: ${picksData.passedGates || '—'} |
           Min pewność: ${(gates.minConfidence || 0) * 100}% |
           <span style="font-size:0.9em">${picksData.generatedAt || ''}</span>
+          ${dataAgeMin > 0 ? `| <strong>${dataAgeMin} min temu</strong>` : ''}
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px">
           ${picksData.picks.map(p => `
@@ -182,7 +191,12 @@ async function loadTop5() {
       return;
     }
 
-    if (tsEl && rankedAt) tsEl.textContent = `Ranking z: ${rankedAt}`;
+    if (tsEl && rankedAt) {
+      const ageMin = data.dataAgeSec ? Math.round(data.dataAgeSec / 60) : 0;
+      const ageLabel = ageMin > 60 ? ` (⚠ ${ageMin} min temu)` : ageMin > 0 ? ` (${ageMin} min temu)` : '';
+      tsEl.textContent = `Ranking z: ${rankedAt}${ageLabel}`;
+      tsEl.style.color = ageMin > 60 ? 'var(--red)' : '';
+    }
 
     const top5 = ranking.slice(0, 5);
     const bottom5 = ranking.slice(-5).reverse();
