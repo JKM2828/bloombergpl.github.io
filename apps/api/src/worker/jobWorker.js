@@ -78,7 +78,53 @@ let stats = {
   startedAt: null,
   analysisRuns: 0,
   mode: 'starting', // 'market', 'off-hours', 'night'
+  lastRunId: null,
 };
+
+// ============================================================
+// PIPELINE RUN TRACKING
+// ============================================================
+
+function generateRunId() {
+  const now = new Date();
+  const ts = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `run_${ts}_${rand}`;
+}
+
+function createPipelineRun(runId, universeTotal) {
+  run(`INSERT INTO pipeline_runs (run_id, started_at, universe_total, status)
+       VALUES (?, datetime('now'), ?, 'running')`,
+    [runId, universeTotal]);
+  saveDb();
+}
+
+function updatePipelineRun(runId, updates) {
+  const cols = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  const vals = Object.values(updates);
+  run(`UPDATE pipeline_runs SET ${cols} WHERE run_id = ?`, [...vals, runId]);
+  saveDb();
+}
+
+function recordTickerStatus(runId, ticker, stage, status, reason) {
+  run(`INSERT OR REPLACE INTO pipeline_ticker_status (run_id, ticker, stage, status, reason)
+       VALUES (?, ?, ?, ?, ?)`,
+    [runId, ticker, stage, status, reason || null]);
+}
+
+function getLatestPipelineRun() {
+  return queryOne('SELECT * FROM pipeline_runs ORDER BY started_at DESC LIMIT 1');
+}
+
+function getPipelineRunById(runId) {
+  const pipelineRun = queryOne('SELECT * FROM pipeline_runs WHERE run_id = ?', [runId]);
+  if (!pipelineRun) return null;
+  const tickerStatuses = query(
+    'SELECT ticker, stage, status, reason FROM pipeline_ticker_status WHERE run_id = ? ORDER BY stage, ticker',
+    [runId]
+  );
+  return { ...pipelineRun, tickerStatuses };
+}
 
 // ============================================================
 // JOB QUEUE
@@ -168,33 +214,96 @@ const processors = {
 
   /**
    * Continuous analysis pipeline — runs after each successful ingest.
-   * Chains: features → predict → signals → screener.
-   * In degraded mode (low data), skips screener to save time.
+   * Chains: features → predict → signals → screener → picks.
+   * In degraded mode (low data coverage), still runs screener but flags results.
+   * Tracks per-ticker status via run_id.
    */
   async analysis(payload) {
-    console.log('[worker] Running continuous analysis pipeline...');
+    const runId = generateRunId();
+    stats.lastRunId = runId;
+    console.log(`[worker] Running analysis pipeline (run_id=${runId})...`);
+
+    const instruments = query("SELECT ticker FROM instruments WHERE active = 1");
+    const universeTotal = instruments.length;
+    createPipelineRun(runId, universeTotal);
+
     const cycleStats = getLastCycleStats();
     const degraded = cycleStats && cycleStats.liveCoveragePct < 80;
 
-    computeAllFeatures();
-    stats.lastFeatures = new Date().toISOString();
+    // ---- FEATURES ----
+    let featuresOk = 0;
+    try {
+      computeAllFeatures();
+      stats.lastFeatures = new Date().toISOString();
+      // Count tickers with fresh features
+      for (const { ticker } of instruments) {
+        const feat = queryOne(
+          "SELECT 1 FROM features WHERE ticker = ? AND date >= date('now', '-3 days')",
+          [ticker]
+        );
+        if (feat) {
+          featuresOk++;
+          recordTickerStatus(runId, ticker, 'features', 'ok', null);
+        } else {
+          recordTickerStatus(runId, ticker, 'features', 'missing', 'No recent features');
+        }
+      }
+    } catch (err) {
+      console.error(`[worker] Features failed: ${err.message}`);
+      updatePipelineRun(runId, { error: `features: ${err.message}` });
+    }
 
-    const predictions = predictAll(payload.horizonDays || 5);
-    generateAllSignals(predictions);
-    stats.lastPrediction = new Date().toISOString();
+    // ---- PREDICT ----
+    let predictedOk = 0;
+    try {
+      const predictions = predictAll(payload.horizonDays || 5);
+      generateAllSignals(predictions);
+      stats.lastPrediction = new Date().toISOString();
+      for (const { ticker } of instruments) {
+        const pred = queryOne(
+          "SELECT 1 FROM predictions WHERE ticker = ? AND created_at >= datetime('now', '-1 day')",
+          [ticker]
+        );
+        if (pred) {
+          predictedOk++;
+          recordTickerStatus(runId, ticker, 'predict', 'ok', null);
+        } else {
+          recordTickerStatus(runId, ticker, 'predict', 'missing', 'No prediction generated');
+        }
+      }
+    } catch (err) {
+      console.error(`[worker] Predict failed: ${err.message}`);
+      updatePipelineRun(runId, { error: `predict: ${err.message}` });
+    }
 
-    if (!degraded) {
-      runScreener();
+    // ---- SCREENER (always runs, even degraded) ----
+    let rankedOk = 0;
+    try {
+      const rankings = runScreener();
+      rankedOk = rankings.length;
       stats.lastScreener = new Date().toISOString();
 
-      // Generate Daily Top 5 picks after each full analysis
+      for (const { ticker } of instruments) {
+        const inRanking = rankings.find(r => r.ticker === ticker);
+        if (inRanking) {
+          recordTickerStatus(runId, ticker, 'ranking', 'ok', `score=${inRanking.score}`);
+        } else {
+          recordTickerStatus(runId, ticker, 'ranking', 'filtered', 'Did not pass hard filters');
+        }
+      }
+
+      // Generate Daily Top 5 picks
       const picksData = getDailyPicks();
       if (picksData.picks.length > 0) saveDailyPicks(picksData.picks);
       validatePastPicks();
       stats.lastPicks = new Date().toISOString();
-      console.log(`[worker] Daily picks: ${picksData.picks.map(p => p.ticker).join(', ')}`);
 
-      // Precision KPI check — auto-retrain if model quality drops below threshold
+      if (degraded) {
+        console.warn(`[worker] Degraded mode — screener ran but coverage low (${cycleStats?.liveCoveragePct}%)`);
+      }
+      console.log(`[worker] Daily picks: ${picksData.picks.map(p => p.ticker).join(', ') || '(none passed gates)'}`);
+
+      // Precision KPI check
       const kpi = checkPrecisionKPI();
       if (kpi.retrain) {
         const alreadyTraining = queryOne(
@@ -205,13 +314,31 @@ const processors = {
           console.warn(`[worker] Emergency retrain enqueued (precision@1D=${kpi.precision1D}%)`);
         }
       }
-    } else {
-      console.log('[worker] Degraded mode — skipping screener & picks (coverage < 80%)');
+    } catch (err) {
+      console.error(`[worker] Screener failed: ${err.message}`);
+      updatePipelineRun(runId, { error: `screener: ${err.message}` });
     }
+
+    // ---- Finalize run ----
+    const coveragePct = universeTotal > 0 ? Math.round((rankedOk / universeTotal) * 1000) / 10 : 0;
+    updatePipelineRun(runId, {
+      finished_at: new Date().toISOString(),
+      status: 'completed',
+      ingested_ok: cycleStats?.liveCoveragePct ? Math.round(universeTotal * cycleStats.liveCoveragePct / 100) : 0,
+      features_ok: featuresOk,
+      predicted_ok: predictedOk,
+      ranked_ok: rankedOk,
+      coverage_pct: coveragePct,
+      degraded: degraded ? 1 : 0,
+      summary: JSON.stringify({
+        featuresOk, predictedOk, rankedOk, universeTotal, coveragePct, degraded,
+        ingestCoverage: cycleStats?.liveCoveragePct || null,
+      }),
+    });
 
     stats.lastAnalysisCycle = new Date().toISOString();
     stats.analysisRuns++;
-    console.log(`[worker] Analysis pipeline complete (run #${stats.analysisRuns}, degraded=${degraded})`);
+    console.log(`[worker] Analysis pipeline complete (run_id=${runId}, run #${stats.analysisRuns}, ranked=${rankedOk}/${universeTotal}, coverage=${coveragePct}%, degraded=${degraded})`);
   },
 
   async full_pipeline(_payload) {
@@ -418,6 +545,7 @@ function getWorkerStatus() {
   `);
 
   const lastCycle = require('../ingest/ingestPipeline').getLastCycleStats();
+  const latestRun = getLatestPipelineRun();
 
   return {
     isRunning,
@@ -436,6 +564,16 @@ function getWorkerStatus() {
       rateLimited: lastCycle.rateLimited,
       timestamp: lastCycle.timestamp,
     } : null,
+    lastPipelineRun: latestRun ? {
+      runId: latestRun.run_id,
+      status: latestRun.status,
+      universeTotal: latestRun.universe_total,
+      rankedOk: latestRun.ranked_ok,
+      coveragePct: latestRun.coverage_pct,
+      degraded: !!latestRun.degraded,
+      startedAt: latestRun.started_at,
+      finishedAt: latestRun.finished_at,
+    } : null,
   };
 }
 
@@ -449,4 +587,6 @@ module.exports = {
   processors,
   getCurrentMode,
   getPrecisionKPI,
+  getLatestPipelineRun,
+  getPipelineRunById,
 };

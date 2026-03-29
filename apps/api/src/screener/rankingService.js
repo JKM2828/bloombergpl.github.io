@@ -555,15 +555,21 @@ function getDailyPicks(opts = {}) {
   }
 
   // --- Phase 2: Quality gate filtering ---
-  const gated = candidates.filter(c => {
-    if (c.confidence < QUALITY_GATES.minConfidence) return false;
-    if (c.expectedReturn < QUALITY_GATES.minExpectedReturn) return false;
-    if (c.executionScore < QUALITY_GATES.minLiquidityScore) return false;
-    if (c.score < QUALITY_GATES.minCompositeScore) return false;
-    // Direction must be BUY for long-only aggressive picks
-    if (c.pred?.predicted_direction === 'SELL') return false;
-    return true;
-  });
+  const gated = [];
+  const rejected = [];
+  for (const c of candidates) {
+    const reasons = [];
+    if (c.confidence < QUALITY_GATES.minConfidence) reasons.push(`confidence ${(c.confidence*100).toFixed(0)}% < ${QUALITY_GATES.minConfidence*100}%`);
+    if (c.expectedReturn < QUALITY_GATES.minExpectedReturn) reasons.push(`expectedReturn ${(c.expectedReturn*100).toFixed(1)}% < ${(QUALITY_GATES.minExpectedReturn*100).toFixed(1)}%`);
+    if (c.executionScore < QUALITY_GATES.minLiquidityScore) reasons.push(`liquidity ${(c.executionScore*100).toFixed(0)}% < ${QUALITY_GATES.minLiquidityScore*100}%`);
+    if (c.score < QUALITY_GATES.minCompositeScore) reasons.push(`score ${c.score} < ${QUALITY_GATES.minCompositeScore}`);
+    if (c.pred?.predicted_direction === 'SELL') reasons.push('direction=SELL');
+    if (reasons.length > 0) {
+      rejected.push({ ticker: c.ticker, reasons });
+    } else {
+      gated.push(c);
+    }
+  }
 
   // --- Phase 3: Sort by edge score (best alpha first), sector-cap ---
   gated.sort((a, b) => b.edgeScore - a.edgeScore);
@@ -620,8 +626,9 @@ function getDailyPicks(opts = {}) {
     totalScreened: ranking.length,
     totalCandidates: candidates.length,
     passedGates: gated.length,
+    rejectedGates: rejected,
     qualityGates: QUALITY_GATES,
-    generatedAt: new Date().toISOString(),
+    generatedAt: ranking[0]?.ranked_at || null,
   };
 }
 
@@ -652,7 +659,8 @@ function getBestToInvest(limit = 10) {
   return {
     picks: top,
     regime: stocks.regime,
-    generatedAt: new Date().toISOString(),
+    rankedAt: stocks.rankedAt || futures.rankedAt || null,
+    generatedAt: stocks.rankedAt || futures.rankedAt || null,
     totalStocks: stocks.picks.length,
     totalFutures: futures.picks.length,
   };

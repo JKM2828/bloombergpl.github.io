@@ -12,8 +12,8 @@ const { ALL_INSTRUMENTS, sma, ema, rsi, volatility, maxDrawdown } = require('../
 const { computeAllFeatures, getLatestFeatures } = require('../ml/featureEngineering');
 const { predictAll, getLatestPredictions, getLatestPrediction, trainAll } = require('../ml/mlEngine');
 const { backtestAll } = require('../ml/backtest');
-const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStopLevels, computeSellLevels, getSellCandidates, RISK_CONFIG } = require('../ml/riskEngine');
-const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI } = require('../worker/jobWorker');
+const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStopLevels, computeSellLevels, getSellCandidates, getCompetitionSellCandidates, RISK_CONFIG } = require('../ml/riskEngine');
+const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI, getLatestPipelineRun, getPipelineRunById } = require('../worker/jobWorker');
 const { getLastCycleStats } = require('../ingest/ingestPipeline');
 const { assessFeedQuality, assessAllFeedQuality } = require('../ingest/feedMonitor');
 
@@ -227,8 +227,8 @@ router.get('/picks/daily', (req, res) => {
   const limit = parseInt(req.query.limit) || 5;
   const assetTypes = req.query.types ? req.query.types.split(',').map(t => t.trim().toUpperCase()) : undefined;
   const data = getDailyPicks({ assetTypes, limit });
-  const generatedAt = data.generatedAt || null;
-  const dataAgeSec = generatedAt ? Math.round((Date.now() - new Date(generatedAt).getTime()) / 1000) : null;
+  const rankedAt = data.rankedAt || null;
+  const dataAgeSec = rankedAt ? Math.round((Date.now() - new Date(rankedAt).getTime()) / 1000) : null;
   res.json({
     ...data,
     dataAgeSec,
@@ -1055,6 +1055,125 @@ router.get('/report/validation', (req, res) => {
       featureCoverage: totalInstruments > 0 ? Math.round(withFeatures / totalInstruments * 100) : 0,
     },
     disclaimer: 'Raport walidacyjny — wyniki historyczne nie gwarantują przyszłych wyników.',
+  });
+});
+
+// ============================================================
+// Pipeline Run Status – per-run audit with ticker-level detail
+// ============================================================
+router.get('/pipeline/status', (req, res) => {
+  const latest = getLatestPipelineRun();
+  if (!latest) return res.json({ message: 'No pipeline runs recorded yet', run: null });
+  const detail = getPipelineRunById(latest.run_id);
+  res.json({ run: detail });
+});
+
+router.get('/pipeline/status/:runId', (req, res) => {
+  const detail = getPipelineRunById(req.params.runId);
+  if (!detail) return res.status(404).json({ error: 'Run not found' });
+  res.json({ run: detail });
+});
+
+router.get('/pipeline/runs', (req, res) => {
+  const limit = parseInt(req.query.limit) || 20;
+  const runs = query(
+    'SELECT run_id, started_at, finished_at, status, universe_total, ranked_ok, coverage_pct, degraded FROM pipeline_runs ORDER BY started_at DESC LIMIT ?',
+    [limit]
+  );
+  res.json({ count: runs.length, runs });
+});
+
+// ============================================================
+// Competition Portfolio – track real competition positions
+// ============================================================
+router.get('/competition/portfolio', (req, res) => {
+  const positions = query(
+    "SELECT * FROM competition_portfolio WHERE status = 'open' ORDER BY entry_date DESC"
+  );
+  // Enrich with current price + P&L
+  const enriched = positions.map(pos => {
+    const latest = queryOne(
+      'SELECT close, date FROM candles WHERE ticker = ? ORDER BY date DESC LIMIT 1',
+      [pos.ticker]
+    );
+    const currentPrice = latest?.close || pos.entry_price;
+    const pnlPct = ((currentPrice - pos.entry_price) / pos.entry_price * 100);
+    const pnlValue = (currentPrice - pos.entry_price) * pos.shares;
+    return {
+      ...pos,
+      currentPrice: Math.round(currentPrice * 100) / 100,
+      currentDate: latest?.date || null,
+      pnlPct: Math.round(pnlPct * 100) / 100,
+      pnlValue: Math.round(pnlValue * 100) / 100,
+      marketValue: Math.round(currentPrice * pos.shares * 100) / 100,
+    };
+  });
+
+  const totalValue = enriched.reduce((s, p) => s + p.marketValue, 0);
+  const totalPnl = enriched.reduce((s, p) => s + p.pnlValue, 0);
+
+  res.json({
+    count: enriched.length,
+    totalMarketValue: Math.round(totalValue * 100) / 100,
+    totalPnl: Math.round(totalPnl * 100) / 100,
+    positions: enriched,
+  });
+});
+
+router.post('/competition/buy', (req, res) => {
+  const { ticker, shares, entry_price, entry_date, notes } = req.body;
+  if (!ticker || !shares || !entry_price) {
+    return res.status(400).json({ error: 'ticker, shares, entry_price required' });
+  }
+  run(
+    `INSERT INTO competition_portfolio (ticker, shares, entry_price, entry_date, notes)
+     VALUES (?, ?, ?, ?, ?)`,
+    [ticker.toUpperCase(), parseFloat(shares), parseFloat(entry_price),
+     entry_date || new Date().toISOString().slice(0, 10), notes || null]
+  );
+  saveDb();
+  res.json({ message: `Bought ${shares} ${ticker.toUpperCase()} @ ${entry_price}` });
+});
+
+router.post('/competition/sell', (req, res) => {
+  const { positionId, exit_price, exit_date } = req.body;
+  if (!positionId || !exit_price) {
+    return res.status(400).json({ error: 'positionId, exit_price required' });
+  }
+  const pos = queryOne('SELECT * FROM competition_portfolio WHERE id = ? AND status = ?', [positionId, 'open']);
+  if (!pos) return res.status(404).json({ error: 'Open position not found' });
+
+  run(
+    "UPDATE competition_portfolio SET status = 'closed', exit_price = ?, exit_date = ? WHERE id = ?",
+    [parseFloat(exit_price), exit_date || new Date().toISOString().slice(0, 10), positionId]
+  );
+  saveDb();
+  const pnl = ((exit_price - pos.entry_price) / pos.entry_price * 100).toFixed(2);
+  res.json({ message: `Sold ${pos.ticker} @ ${exit_price} (P&L: ${pnl}%)` });
+});
+
+router.get('/competition/sell-candidates', (req, res) => {
+  const candidates = getCompetitionSellCandidates();
+  res.json({
+    count: candidates.length,
+    candidates,
+    disclaimer: 'Sygnały sprzedaży dla portfela konkursowego — analiza algorytmiczna.',
+  });
+});
+
+router.get('/competition/history', (req, res) => {
+  const trades = query(
+    "SELECT * FROM competition_portfolio ORDER BY COALESCE(exit_date, entry_date) DESC LIMIT 100"
+  );
+  const closed = trades.filter(t => t.status === 'closed');
+  const wins = closed.filter(t => t.exit_price > t.entry_price).length;
+  const losses = closed.filter(t => t.exit_price <= t.entry_price).length;
+  res.json({
+    totalTrades: closed.length,
+    wins,
+    losses,
+    winRate: closed.length > 0 ? Math.round(wins / closed.length * 100) : null,
+    trades,
   });
 });
 

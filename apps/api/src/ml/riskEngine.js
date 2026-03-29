@@ -523,11 +523,95 @@ function getSellCandidates() {
   return candidates;
 }
 
+// ============================================================
+// COMPETITION PORTFOLIO SELL CANDIDATES
+// Uses competition_portfolio table instead of simulated portfolio.
+// ============================================================
+
+function getCompetitionSellCandidates() {
+  const positions = query(
+    "SELECT id, ticker, shares, entry_price, entry_date FROM competition_portfolio WHERE status = 'open'"
+  );
+
+  const candidates = [];
+  for (const pos of positions) {
+    const latest = queryOne(
+      'SELECT close, high, low, date FROM candles WHERE ticker = ? ORDER BY date DESC LIMIT 1',
+      [pos.ticker]
+    );
+    if (!latest) continue;
+
+    const currentPrice = latest.close;
+    const entryPrice = pos.entry_price;
+    const pnlPct = (currentPrice - entryPrice) / entryPrice * 100;
+
+    const sellLevels = computeSellLevels(pos.ticker, entryPrice);
+    if (!sellLevels) continue;
+
+    const daysHeld = pos.entry_date
+      ? Math.floor((Date.now() - new Date(pos.entry_date).getTime()) / 86400000) : 0;
+
+    const sellReasons = [];
+    let action = 'HOLD';
+
+    if (currentPrice >= sellLevels.takeProfitFull) {
+      sellReasons.push('Osiągnięto pełny TP');
+      action = 'SELL';
+    } else if (currentPrice >= sellLevels.takeProfitFast) {
+      sellReasons.push('Osiągnięto szybki TP – rozważ częściową sprzedaż');
+      action = 'PARTIAL_SELL';
+    }
+    if (currentPrice <= sellLevels.stopLoss) {
+      sellReasons.push('Poniżej stop-loss');
+      action = 'SELL';
+    }
+    if (daysHeld >= RISK_CONFIG.maxHoldSessions) {
+      sellReasons.push(`Przekroczono max hold (${daysHeld} dni)`);
+      action = action === 'HOLD' ? 'SELL' : action;
+    }
+    if (daysHeld >= RISK_CONFIG.softTimeoutSessions && pnlPct < 1) {
+      sellReasons.push(`Timeout ${daysHeld}D bez progresu`);
+      action = action === 'HOLD' ? 'CONSIDER_SELL' : action;
+    }
+
+    const features = queryOne(
+      'SELECT rsi14, macd_hist, regime FROM features WHERE ticker = ? ORDER BY date DESC LIMIT 1',
+      [pos.ticker]
+    );
+    if (features && features.rsi14 > 75 && features.macd_hist < 0) {
+      sellReasons.push('Momentum osłabiony (RSI>75 + MACD<0)');
+      if (action === 'HOLD') action = 'CONSIDER_SELL';
+    }
+
+    candidates.push({
+      positionId: pos.id,
+      ticker: pos.ticker,
+      shares: pos.shares,
+      entryPrice: r4(entryPrice),
+      entryDate: pos.entry_date,
+      currentPrice: r4(currentPrice),
+      pnlPct: r4(pnlPct),
+      daysHeld,
+      action,
+      sellReasons,
+      sellLevels,
+    });
+  }
+
+  candidates.sort((a, b) => {
+    const priority = { SELL: 0, PARTIAL_SELL: 1, CONSIDER_SELL: 2, HOLD: 3 };
+    return (priority[a.action] ?? 3) - (priority[b.action] ?? 3);
+  });
+
+  return candidates;
+}
+
 module.exports = {
   calculatePositionSize,
   calculateStopLevels,
   computeSellLevels,
   getSellCandidates,
+  getCompetitionSellCandidates,
   assessPortfolioRisk,
   generateSignal,
   generateAllSignals,

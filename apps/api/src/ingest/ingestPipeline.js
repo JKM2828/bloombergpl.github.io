@@ -189,6 +189,7 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
     const dateFrom = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
 
     let fallbackCallsUsed = 0;
+    const MAX_RETRIES = 2;
 
     for (let i = 0; i < missingTickers.length; i += FALLBACK_BATCH_SIZE) {
       if (fallbackCallsUsed >= remainingBudget) {
@@ -204,17 +205,49 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
       fallbackCallsUsed += batch.length;
       totalHttpCalls += batch.length;
 
+      // Collect tickers that need retry
+      const retryNeeded = [];
       for (let j = 0; j < results.length; j++) {
         if (results[j].status === 'fulfilled') {
           const r = results[j].value;
           total += r.inserted;
           if (r.inserted > 0) fallbackHits++;
           if (r.rateLimited) rateLimited++;
-          if (r.noData) noDataTickers.push(batch[j]);
+          if (r.noData) {
+            noDataTickers.push(batch[j]);
+            retryNeeded.push(batch[j]);
+          }
         } else {
           errors++;
+          retryNeeded.push(batch[j]);
           run('INSERT INTO ingest_log (provider, ticker, status, rows_inserted, message) VALUES (?, ?, ?, ?, ?)',
             ['unknown', batch[j], 'error', 0, results[j].reason?.message || 'Unknown error']);
+        }
+      }
+
+      // Retry failed tickers once with longer delay
+      if (retryNeeded.length > 0 && fallbackCallsUsed < remainingBudget) {
+        await sleep(FALLBACK_DELAY_MS * 2);
+        for (let retry = 0; retry < Math.min(retryNeeded.length, MAX_RETRIES); retry++) {
+          if (fallbackCallsUsed >= remainingBudget) break;
+          const ticker = retryNeeded[retry];
+          try {
+            const r = await processTicker(ticker, dateFrom, dateTo, retry * TICKER_DELAY_MS * 2);
+            fallbackCallsUsed++;
+            totalHttpCalls++;
+            if (r.inserted > 0) {
+              fallbackHits++;
+              total += r.inserted;
+              retryRecovered++;
+              // Remove from noDataTickers if it was there
+              const idx = noDataTickers.indexOf(ticker);
+              if (idx !== -1) noDataTickers.splice(idx, 1);
+              console.log(`[ingest] Retry success: ${ticker} (${r.inserted} candles)`);
+            }
+          } catch {
+            fallbackCallsUsed++;
+            totalHttpCalls++;
+          }
         }
       }
 

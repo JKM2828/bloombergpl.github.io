@@ -258,6 +258,62 @@ async function migrate() {
     )
   `);
 
+  // ---- Pipeline Runs – per-batch tracking with per-ticker status ----
+  db.run(`
+    CREATE TABLE IF NOT EXISTS pipeline_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL UNIQUE,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      status TEXT DEFAULT 'running',
+      universe_total INTEGER DEFAULT 0,
+      ingested_ok INTEGER DEFAULT 0,
+      features_ok INTEGER DEFAULT 0,
+      predicted_ok INTEGER DEFAULT 0,
+      ranked_ok INTEGER DEFAULT 0,
+      coverage_pct REAL DEFAULT 0,
+      degraded INTEGER DEFAULT 0,
+      error TEXT,
+      summary TEXT
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_pipeline_runs_id ON pipeline_runs(run_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status, started_at DESC)`);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS pipeline_ticker_status (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL,
+      ticker TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reason TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(run_id, ticker, stage)
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_pts_run ON pipeline_ticker_status(run_id, stage)`);
+
+  // ---- Competition Portfolio – tracks real competition positions ----
+  db.run(`
+    CREATE TABLE IF NOT EXISTS competition_portfolio (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticker TEXT NOT NULL,
+      shares REAL NOT NULL,
+      entry_price REAL NOT NULL,
+      entry_date TEXT NOT NULL,
+      exit_price REAL,
+      exit_date TEXT,
+      status TEXT DEFAULT 'open',
+      notes TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_comp_port_status ON competition_portfolio(status)`);
+
   saveDb();
   console.log('[migrate] Database schema created / verified.');
 }
