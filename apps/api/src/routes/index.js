@@ -19,6 +19,14 @@ const { assessFeedQuality, assessAllFeedQuality } = require('../ingest/feedMonit
 
 const router = express.Router();
 
+// ---- Anti-cache middleware for all dynamic API endpoints ----
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
+
 // ============================================================
 // Instruments
 // ============================================================
@@ -196,7 +204,8 @@ router.get('/ranking', (req, res) => {
   const limit = parseInt(req.query.limit) || 20;
   const ranking = getLatestRanking(limit);
   const rankedAt = ranking.length > 0 ? ranking[0].ranked_at : null;
-  res.json({ count: ranking.length, rankedAt, ranking });
+  const dataAgeSec = rankedAt ? Math.round((Date.now() - new Date(rankedAt).getTime()) / 1000) : null;
+  res.json({ count: ranking.length, rankedAt, dataAgeSec, ranking });
 });
 
 router.post('/ranking/run', async (req, res) => {
@@ -218,8 +227,11 @@ router.get('/picks/daily', (req, res) => {
   const limit = parseInt(req.query.limit) || 5;
   const assetTypes = req.query.types ? req.query.types.split(',').map(t => t.trim().toUpperCase()) : undefined;
   const data = getDailyPicks({ assetTypes, limit });
+  const generatedAt = data.generatedAt || null;
+  const dataAgeSec = generatedAt ? Math.round((Date.now() - new Date(generatedAt).getTime()) / 1000) : null;
   res.json({
     ...data,
+    dataAgeSec,
     disclaimer: 'Dzienne Top picks – analiza algorytmiczna, nie stanowi porady inwestycyjnej.',
   });
 });
@@ -705,6 +717,50 @@ router.get('/growth/daily', (req, res) => {
 router.get('/growth/weekly', (req, res) => {
   const report = getWeeklyGrowthReport();
   res.json(report);
+});
+
+// ============================================================
+// Diagnostics – freshness per ticker  + provider health summary
+// ============================================================
+router.get('/diagnostics/freshness', (req, res) => {
+  const tickers = query('SELECT ticker FROM instruments WHERE active = 1');
+  const results = [];
+  for (const { ticker } of tickers) {
+    const daily = queryOne(
+      "SELECT date, close FROM candles WHERE ticker = ? AND (timeframe = '1d' OR timeframe IS NULL) ORDER BY date DESC LIMIT 1",
+      [ticker]
+    );
+    const intra = queryOne(
+      "SELECT date FROM candles WHERE ticker = ? AND timeframe IN ('5m','1h') ORDER BY date DESC LIMIT 1",
+      [ticker]
+    );
+    const lastLog = queryOne(
+      "SELECT status, message, created_at FROM ingest_log WHERE ticker = ? ORDER BY created_at DESC LIMIT 1",
+      [ticker]
+    );
+    const dailyAgeSec = daily ? Math.round((Date.now() - new Date(daily.date).getTime()) / 1000) : null;
+    const intraAgeSec = intra ? Math.round((Date.now() - new Date(intra.date).getTime()) / 1000) : null;
+    results.push({
+      ticker,
+      dailyDate: daily?.date || null,
+      dailyClose: daily?.close || null,
+      dailyAgeSec,
+      intraDate: intra?.date || null,
+      intraAgeSec,
+      lastIngest: lastLog?.created_at || null,
+      lastIngestStatus: lastLog?.status || null,
+      stale: dailyAgeSec != null ? dailyAgeSec > 86400 * 3 : true,
+    });
+  }
+  const staleCount = results.filter(r => r.stale).length;
+  const budgetStats = providerManager.getBudgetStats();
+  res.json({
+    total: results.length,
+    fresh: results.length - staleCount,
+    stale: staleCount,
+    budget: budgetStats,
+    tickers: results,
+  });
 });
 
 // ============================================================

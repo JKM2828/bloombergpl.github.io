@@ -24,6 +24,8 @@ const subscriptions = new Map();
 const clients = new Map();
 // Cache of last broadcasted candle per ticker (to avoid redundant pushes)
 const lastCandle = new Map();
+const lastCandleTime = new Map(); // TTL tracking: ticker -> timestamp of cache set
+const CANDLE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour TTL
 // Polling timer
 let pollTimer = null;
 let heartbeatTimer = null;
@@ -56,9 +58,10 @@ function attachWebSocket(server) {
 
     console.log(`[ws] Client subscribed: ${subKey} (total: ${wss.clients.size})`);
 
-    // Send last known candle immediately (bootstrap)
+    // Send last known candle immediately (bootstrap) — only if not expired
     const cached = lastCandle.get(ticker);
-    if (cached) {
+    const cachedTime = lastCandleTime.get(ticker) || 0;
+    if (cached && (Date.now() - cachedTime) < CANDLE_CACHE_TTL_MS) {
       safeSend(ws, JSON.stringify({ type: 'candle', ticker, timeframe: tf, candle: cached }));
     }
 
@@ -76,9 +79,10 @@ function attachWebSocket(server) {
             subscriptions.set(newKey, new Set());
           }
           subscriptions.get(newKey).add(ws);
-          // Bootstrap cached candle for new sub
+          // Bootstrap cached candle for new sub — only if not expired
           const c = lastCandle.get(msg.ticker.toUpperCase());
-          if (c) {
+          const ct = lastCandleTime.get(msg.ticker.toUpperCase()) || 0;
+          if (c && (Date.now() - ct) < CANDLE_CACHE_TTL_MS) {
             safeSend(ws, JSON.stringify({ type: 'candle', ticker: msg.ticker.toUpperCase(), timeframe: msg.tf || '5m', candle: c }));
           }
         } else if (msg.action === 'unsubscribe' && msg.ticker) {
@@ -190,6 +194,7 @@ async function pollAndBroadcast() {
       }
 
       lastCandle.set(ticker, candle);
+      lastCandleTime.set(ticker, Date.now());
 
       // Broadcast to all timeframes this ticker is subscribed to
       for (const subKey of subscriptions.keys()) {
@@ -208,6 +213,7 @@ async function pollAndBroadcast() {
         const candle = await gpwProvider.fetchQuote(ticker);
         if (!candle) continue;
         lastCandle.set(ticker, candle);
+        lastCandleTime.set(ticker, Date.now());
         for (const subKey of subscriptions.keys()) {
           const [t, tf] = subKey.split(':');
           if (t === ticker) broadcast(ticker, tf, candle);

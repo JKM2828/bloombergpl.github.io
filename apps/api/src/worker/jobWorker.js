@@ -261,6 +261,8 @@ async function processNextJob() {
       if (!alreadyQueued) {
         enqueueJob('analysis', {}, 4);
         console.log('[worker] Auto-enqueued analysis after ingest');
+      } else {
+        console.log('[worker] Analysis already queued/running — skipping auto-enqueue');
       }
     }
 
@@ -415,6 +417,8 @@ function getWorkerStatus() {
     FROM jobs ORDER BY created_at DESC LIMIT 10
   `);
 
+  const lastCycle = require('../ingest/ingestPipeline').getLastCycleStats();
+
   return {
     isRunning,
     currentMode: getCurrentMode(),
@@ -424,6 +428,14 @@ function getWorkerStatus() {
     failedCount: failedJobs?.cnt || 0,
     activeLocks: [...runningLocks],
     recentJobs,
+    lastIngestCycle: lastCycle ? {
+      liveCoveragePct: lastCycle.liveCoveragePct,
+      batchCoveragePct: lastCycle.batchCoveragePct,
+      httpCalls: lastCycle.httpCalls,
+      budgetExhausted: lastCycle.budgetExhausted || false,
+      rateLimited: lastCycle.rateLimited,
+      timestamp: lastCycle.timestamp,
+    } : null,
   };
 }
 

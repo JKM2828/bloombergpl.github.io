@@ -46,32 +46,28 @@ function getLastCycleStats() { return lastCycleStats; }
 
 /**
  * Check if a ticker already has fresh data.
- * During GPW market hours (Mon-Fri 9-17 Warsaw): only fresh if updated within last 20 min.
- * Outside market hours: fresh if last candle is from today or last trading day.
+ * Daily candles: fresh if last candle date is from today or the previous trading day.
+ * During market hours we still accept same-day or prev-trading-day dailies as fresh
+ * because EOD candle won't exist until after close.
+ * Intraday candles (5m/1h): fresh only if updated within last 20 min during market.
  */
 function isTickerFresh(ticker) {
   const row = queryOne(
-    'SELECT date FROM candles WHERE ticker = ? ORDER BY date DESC LIMIT 1',
+    "SELECT date FROM candles WHERE ticker = ? AND (timeframe = '1d' OR timeframe IS NULL) ORDER BY date DESC LIMIT 1",
     [ticker]
   );
   if (!row || !row.date) return false;
   const lastDate = new Date(row.date);
   const now = new Date();
 
-  // During market hours, require data from within last 20 minutes
-  if (isMarketHours(now)) {
-    const diffMs = now - lastDate;
-    return diffMs < 20 * 60 * 1000; // 20 minutes
-  }
-
-  // Outside market hours: use calendar-day logic
+  // Calendar-day logic for daily candles (works both in and out of market hours)
   const diffDays = Math.floor((now - lastDate) / 86400000);
-  if (diffDays <= 0) return true;
-  if (diffDays === 1) return true;
+  if (diffDays <= 0) return true; // same day
+  if (diffDays === 1) return true; // yesterday
   const dow = now.getDay();
-  if (dow === 6 && diffDays <= 1) return true;
-  if (dow === 0 && diffDays <= 2) return true;
-  if (dow === 1 && diffDays <= 3) return true;
+  if (dow === 6 && diffDays <= 1) return true; // Saturday → Friday ok
+  if (dow === 0 && diffDays <= 2) return true; // Sunday → Friday ok
+  if (dow === 1 && diffDays <= 3) return true; // Monday → Friday ok
   return false;
 }
 
@@ -111,24 +107,32 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
   let tickers = allTickers;
   if (skipFresh) {
     const stale = [];
+    const skipReasons = [];
     for (const t of allTickers) {
       if (isTickerFresh(t)) {
         skippedFresh++;
+        skipReasons.push(t);
       } else {
         stale.push(t);
       }
     }
     console.log(`[ingest] Smart skip: ${skippedFresh}/${allTickers.length} tickers already fresh, ${stale.length} need update`);
+    if (skipReasons.length > 0 && skipReasons.length <= 20) {
+      console.log(`[ingest] Skipped (fresh): ${skipReasons.join(', ')}`);
+    }
     tickers = stale;
   }
 
   if (tickers.length === 0) {
     console.log('[ingest] All tickers fresh — nothing to do.');
-    return {
+    lastCycleStats = {
       total: 0, errors: 0, tickers: 0, skippedFresh,
       batchHits: 0, fallbackHits: 0, noData: 0, rateLimited: 0,
       httpCalls: 0, retryRecovered: 0, batchCoveragePct: 100,
+      liveCoveragePct: 100, mode: getCurrentMode(),
+      timestamp: new Date().toISOString(), budgetExhausted: false,
     };
+    return lastCycleStats;
   }
 
   const budget = getBudget();
@@ -223,7 +227,7 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
       }
     }
   } else if (missingTickers.length > 0) {
-    console.warn(`[ingest] Skipping fallback — HTTP budget exhausted (${totalHttpCalls} calls used).`);
+    console.warn(`[ingest] Skipping fallback — HTTP budget exhausted (${totalHttpCalls} calls used). ${missingTickers.length} tickers still missing.`);
   }
 
   // Auto-deactivate tickers with repeated no-data (provider-agnostic)
@@ -257,11 +261,17 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
   console.log(`[ingest] New candles: ${total}, errors: ${errors}, no-data: ${noDataTickers.length}, rate-limited: ${rateLimited}`);
   console.log(`[ingest] ================================`);
 
+  const budgetExhausted = totalHttpCalls >= (MAX_BATCH_REQUESTS + MAX_FALLBACK_REQUESTS) && missingTickers.length > 0;
+  if (budgetExhausted) {
+    console.warn(`[ingest] ⚠️  Budget exhausted: ${totalHttpCalls} calls used, ${missingTickers.length} tickers still missing data`);
+  }
+
   const result = {
     total, errors, tickers: tickers.length, skippedFresh,
     batchHits, fallbackHits, noData: noDataTickers.length, rateLimited,
     httpCalls: totalHttpCalls, retryRecovered, batchCoveragePct, liveCoveragePct,
     mode: getCurrentMode(), timestamp: new Date().toISOString(),
+    budgetExhausted,
   };
   lastCycleStats = result;
   return result;
