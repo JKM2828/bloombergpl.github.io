@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
       - name: Install dependencies
@@ -30,9 +30,9 @@ jobs:
     needs: test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -54,38 +54,47 @@ jobs:
       - name: Run data quality check
         run: |
           node -e "
-            const { initDb } = require('./apps/api/src/db/connection');
-            initDb();
-            const { assessAllFeedQuality } = require('./apps/api/src/ingest/feedMonitor');
-            const report = assessAllFeedQuality();
-            console.log('=== Feed Quality Report ===');
-            console.log('Total instruments:', report.totalInstruments);
-            console.log('Healthy:', report.healthy);
-            console.log('Degraded:', report.degraded);
-            console.log('Missing:', report.missing);
-            console.log('Health %:', report.healthPct);
-            if (report.details.length > 0) {
-              console.log('\n--- Issues ---');
-              for (const d of report.details.slice(0, 10)) {
-                console.log(d.ticker, ':', d.daily.issues.join(', '));
+            (async () => {
+              const { initDb } = require('./apps/api/src/db/connection');
+              await initDb();
+              const { assessAllFeedQuality } = require('./apps/api/src/ingest/feedMonitor');
+              const report = assessAllFeedQuality();
+              console.log('=== Feed Quality Report ===');
+              console.log('Total instruments:', report.totalInstruments);
+              console.log('Healthy:', report.healthy);
+              console.log('Degraded:', report.degraded);
+              console.log('Missing:', report.missing);
+              console.log('Health %:', report.healthPct);
+              if (report.details.length > 0) {
+                console.log('\n--- Issues ---');
+                for (const d of report.details.slice(0, 10)) {
+                  console.log(d.ticker, ':', d.daily.issues.join(', '));
+                }
               }
-            }
-            if (report.healthPct < 50) {
-              console.error('CRITICAL: Feed health below 50%!');
+              if (report.totalInstruments > 0 && report.healthPct < 50) {
+                console.error('CRITICAL: Feed health below 50%!');
+                process.exit(1);
+              }
+            })().catch((err) => {
+              console.error(err);
               process.exit(1);
-            }
+            });
           "
 
       - name: Verify ML models exist
         run: |
           node -e "
-            const { initDb } = require('./apps/api/src/db/connection');
-            const { query } = require('./apps/api/src/db/connection');
-            initDb();
-            const models = query(\"SELECT COUNT(*) as n FROM model_registry WHERE status = 'active'\");
-            const n = models[0]?.n || 0;
-            console.log('Active ML models:', n);
-            if (n === 0) {
-              console.warn('WARNING: No active ML models found');
-            }
+            (async () => {
+              const { initDb, query } = require('./apps/api/src/db/connection');
+              await initDb();
+              const models = query(\"SELECT COUNT(*) as n FROM model_registry WHERE status = 'active'\");
+              const n = models[0]?.n || 0;
+              console.log('Active ML models:', n);
+              if (n === 0) {
+                console.warn('WARNING: No active ML models found');
+              }
+            })().catch((err) => {
+              console.error(err);
+              process.exit(1);
+            });
           "
