@@ -579,6 +579,72 @@ function stopScheduler() {
 }
 
 // ============================================================
+// ALERTING — detect operational anomalies
+// ============================================================
+const ALERT_THRESHOLDS = {
+  maxIngestGapMinutes: 20,     // max gap between ingests during market hours
+  maxAnalysisGapMinutes: 20,   // max gap between analysis runs during market hours
+  maxStalePicksMinutes: 15,    // max age of rankedAt before alert
+  minIngestCoveragePct: 90,    // ingest coverage alarm threshold
+};
+
+function checkAlerts() {
+  const mode = getCurrentMode();
+  const alerts = [];
+  const now = Date.now();
+
+  // Only check time-based alerts during market hours
+  if (mode === 'market') {
+    if (stats.lastIngest) {
+      const gap = (now - new Date(stats.lastIngest).getTime()) / 60000;
+      if (gap > ALERT_THRESHOLDS.maxIngestGapMinutes) {
+        alerts.push({ level: 'warning', type: 'ingest_gap', message: `No ingest for ${Math.round(gap)} min (threshold: ${ALERT_THRESHOLDS.maxIngestGapMinutes})` });
+      }
+    } else if (stats.startedAt) {
+      const upMin = (now - new Date(stats.startedAt).getTime()) / 60000;
+      if (upMin > ALERT_THRESHOLDS.maxIngestGapMinutes) {
+        alerts.push({ level: 'critical', type: 'no_ingest', message: `Worker running ${Math.round(upMin)} min without any ingest` });
+      }
+    }
+
+    if (stats.lastAnalysisCycle) {
+      const gap = (now - new Date(stats.lastAnalysisCycle).getTime()) / 60000;
+      if (gap > ALERT_THRESHOLDS.maxAnalysisGapMinutes) {
+        alerts.push({ level: 'warning', type: 'analysis_gap', message: `No analysis for ${Math.round(gap)} min (threshold: ${ALERT_THRESHOLDS.maxAnalysisGapMinutes})` });
+      }
+    }
+  }
+
+  // Stuck jobs check (all modes)
+  if (runningLocks.size > 0) {
+    const stuckJobs = query("SELECT id, job_type, started_at FROM jobs WHERE status = 'running'");
+    for (const job of stuckJobs) {
+      if (!job.started_at) continue;
+      const startedAt = new Date(job.started_at.endsWith('Z') ? job.started_at : job.started_at + 'Z').getTime();
+      const elapsed = (now - startedAt) / 60000;
+      const timeout = getJobTimeout(job.job_type) / 60000;
+      if (elapsed > timeout * 0.8) {
+        alerts.push({ level: 'warning', type: 'near_timeout', message: `Job ${job.id} (${job.job_type}) running ${Math.round(elapsed)} min (timeout: ${Math.round(timeout)})` });
+      }
+    }
+  }
+
+  // Ingest coverage check
+  const lastCycle = require('../ingest/ingestPipeline').getLastCycleStats();
+  if (lastCycle && lastCycle.liveCoveragePct < ALERT_THRESHOLDS.minIngestCoveragePct) {
+    alerts.push({ level: 'warning', type: 'low_coverage', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < ${ALERT_THRESHOLDS.minIngestCoveragePct}%` });
+  }
+
+  // Log critical alerts
+  for (const a of alerts) {
+    if (a.level === 'critical') console.error(`[alert] 🚨 ${a.message}`);
+    else if (a.level === 'warning') console.warn(`[alert] ⚠️ ${a.message}`);
+  }
+
+  return alerts;
+}
+
+// ============================================================
 // STATUS
 // ============================================================
 
@@ -636,4 +702,5 @@ module.exports = {
   getPrecisionKPI,
   getLatestPipelineRun,
   getPipelineRunById,
+  checkAlerts,
 };

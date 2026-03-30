@@ -311,7 +311,10 @@ async function loadDashSignal() {
 
 async function loadDashWorker() {
   try {
-    const data = await api('/worker/status');
+    const [data, alertData] = await Promise.all([
+      api('/worker/status'),
+      api('/alerts').catch(() => ({ count: 0, alerts: [], status: 'ok' })),
+    ]);
     const run = data.lastPipelineRun;
     const runInfo = run
       ? `<p>Pipeline: <strong>${run.status}</strong> | Pokrycie: <strong>${run.coveragePct || '—'}%</strong>${run.degraded ? ' <span style="color:var(--red)">(degraded)</span>' : ''}</p>
@@ -323,6 +326,9 @@ async function loadDashWorker() {
     const ingestLabel = ingestAge != null
       ? `<span style="color:${ingestAge > 30 ? 'var(--red)' : ingestAge > 10 ? 'var(--yellow)' : 'var(--green)'}">${ingestAge} min temu</span>`
       : '<span style="color:var(--red)">brak</span>';
+    const alertBanner = alertData.count > 0
+      ? `<div style="background:${alertData.status === 'critical' ? 'var(--red)' : 'var(--yellow)'};color:${alertData.status === 'critical' ? '#fff' : '#000'};padding:4px 8px;border-radius:4px;margin-top:6px;font-size:0.8em">⚠ ${alertData.count} alert${alertData.count > 1 ? 'y' : ''}: ${alertData.alerts.map(a => a.message).join('; ')}</div>`
+      : '';
     document.getElementById('dash-worker-status').innerHTML = `
       <div style="font-size:0.9em">
         <p>Status: <strong style="color:${data.isRunning ? 'var(--green)' : 'var(--red)'}">${data.isRunning ? 'Aktywny' : 'Zatrzymany'}</strong>
@@ -330,6 +336,7 @@ async function loadDashWorker() {
         <p>Kolejka: <strong>${data.queueSize}</strong> | Przetworzono: <strong>${data.jobsProcessed}</strong> | Błędy: <strong>${data.jobsFailed || 0}</strong></p>
         <p>Ostatni ingest: ${ingestLabel}</p>
         ${runInfo}
+        ${alertBanner}
       </div>
     `;
   } catch { /* ignore */ }

@@ -31,6 +31,8 @@ const QUALITY_GATES = {
 // ============================================================
 // HARD FILTERS – ticker must pass ALL to enter ranking
 // Type-aware: FUTURES have different liquidity thresholds
+// Warm-up mode: if ticker has ≥20 candles but <minCandles,
+//   use relaxed thresholds so new tickers can enter ranking.
 // ============================================================
 const FILTERS = {
   STOCK: { minCandles: 60, minAvgDailyVolume: 10000, minAvgDailyTurnover: 50000, minDataFreshnessDays: 5 },
@@ -38,7 +40,17 @@ const FILTERS = {
   FUTURES:{ minCandles: 40, minAvgDailyVolume: 500,   minAvgDailyTurnover: 100000,minDataFreshnessDays: 5 },
   INDEX: { minCandles: 60, minAvgDailyVolume: 0,      minAvgDailyTurnover: 0,     minDataFreshnessDays: 5 },
 };
-function getFilters(type) { return FILTERS[type] || FILTERS.STOCK; }
+const WARMUP_FILTERS = {
+  STOCK: { minCandles: 20, minAvgDailyVolume: 5000,  minAvgDailyTurnover: 20000, minDataFreshnessDays: 5 },
+  ETF:   { minCandles: 20, minAvgDailyVolume: 2000,  minAvgDailyTurnover: 10000, minDataFreshnessDays: 5 },
+  FUTURES:{ minCandles: 15, minAvgDailyVolume: 200,   minAvgDailyTurnover: 50000, minDataFreshnessDays: 5 },
+  INDEX: { minCandles: 20, minAvgDailyVolume: 0,      minAvgDailyTurnover: 0,     minDataFreshnessDays: 5 },
+};
+function getFilters(type, candleCount) {
+  const full = FILTERS[type] || FILTERS.STOCK;
+  if (candleCount >= full.minCandles) return full;
+  return WARMUP_FILTERS[type] || WARMUP_FILTERS.STOCK;
+}
 
 // ============================================================
 // REGIME-DEPENDENT WEIGHT PROFILES (aggressive style)
@@ -73,8 +85,8 @@ function runScreener() {
       [inst.ticker]
     );
 
-    // ---- Type-aware hard filters ----
-    const f = getFilters(inst.type);
+    // ---- Type-aware hard filters (with warm-up for short history) ----
+    const f = getFilters(inst.type, candles.length);
     if (candles.length < f.minCandles) continue;
 
     const lastDate = candles[candles.length - 1].date;

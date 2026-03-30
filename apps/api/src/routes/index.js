@@ -13,7 +13,7 @@ const { computeAllFeatures, getLatestFeatures } = require('../ml/featureEngineer
 const { predictAll, getLatestPredictions, getLatestPrediction, trainAll } = require('../ml/mlEngine');
 const { backtestAll } = require('../ml/backtest');
 const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStopLevels, computeSellLevels, getSellCandidates, getCompetitionSellCandidates, RISK_CONFIG } = require('../ml/riskEngine');
-const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI, getLatestPipelineRun, getPipelineRunById } = require('../worker/jobWorker');
+const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI, getLatestPipelineRun, getPipelineRunById, checkAlerts } = require('../worker/jobWorker');
 const { getLastCycleStats } = require('../ingest/ingestPipeline');
 const { assessFeedQuality, assessAllFeedQuality } = require('../ingest/feedMonitor');
 
@@ -360,11 +360,21 @@ router.get('/today', (req, res) => {
     });
   }
 
+  // Unified run state metadata
+  const latestRunForToday = getLatestPipelineRun();
+  const picksRunMeta = {
+    runId: latestRunForToday?.run_id || null,
+    rankedAt: picksData.rankedAt || null,
+    coveragePct: latestRunForToday?.coverage_pct ?? null,
+    degraded: !!latestRunForToday?.degraded,
+  };
+
   res.json({
     date: new Date().toISOString().slice(0, 10),
     regime: picksData.regime,
     count: actions.length,
     actions: actions.slice(0, limit),
+    pipelineRun: picksRunMeta,
     disclaimer: 'Sygnały dnia — analiza algorytmiczna, nie stanowi porady inwestycyjnej. Inwestowanie wiąże się z ryzykiem.',
   });
 });
@@ -819,9 +829,15 @@ router.get('/kpi/precision', (req, res) => {
 // ============================================================
 router.get('/sell/candidates', (req, res) => {
   const candidates = getSellCandidates();
+  const latestRunForSell = getLatestPipelineRun();
   res.json({
     count: candidates.length,
     candidates,
+    pipelineRun: {
+      runId: latestRunForSell?.run_id || null,
+      rankedAt: latestRunForSell?.started_at || null,
+      coveragePct: latestRunForSell?.coverage_pct ?? null,
+    },
     disclaimer: 'Sygnały sprzedaży – analiza algorytmiczna, nie stanowi porady inwestycyjnej.',
   });
 });
@@ -1168,9 +1184,14 @@ router.post('/competition/sell', (req, res) => {
 
 router.get('/competition/sell-candidates', (req, res) => {
   const candidates = getCompetitionSellCandidates();
+  const latestRunForComp = getLatestPipelineRun();
   res.json({
     count: candidates.length,
     candidates,
+    pipelineRun: {
+      runId: latestRunForComp?.run_id || null,
+      rankedAt: latestRunForComp?.started_at || null,
+    },
     disclaimer: 'Sygnały sprzedaży dla portfela konkursowego — analiza algorytmiczna.',
   });
 });
@@ -1188,6 +1209,62 @@ router.get('/competition/history', (req, res) => {
     losses,
     winRate: closed.length > 0 ? Math.round(wins / closed.length * 100) : null,
     trades,
+  });
+});
+
+// ============================================================
+// Alerts — operational anomaly detection
+// ============================================================
+router.get('/alerts', (req, res) => {
+  const alerts = checkAlerts();
+  res.json({
+    count: alerts.length,
+    status: alerts.some(a => a.level === 'critical') ? 'critical' : alerts.length > 0 ? 'warning' : 'ok',
+    alerts,
+  });
+});
+
+// ============================================================
+// SLO — last 24h pipeline health history
+// ============================================================
+router.get('/slo', (req, res) => {
+  const runs = query(
+    "SELECT run_id, started_at, finished_at, status, universe_total, ingested_ok, features_ok, predicted_ok, ranked_ok, coverage_pct, degraded " +
+    "FROM pipeline_runs WHERE started_at >= datetime('now', '-24 hours') ORDER BY started_at DESC"
+  );
+  const totalRuns = runs.length;
+  const okRuns = runs.filter(r => r.status === 'completed' && !r.degraded).length;
+  const degradedRuns = runs.filter(r => r.degraded).length;
+  const failedRuns = runs.filter(r => r.status !== 'completed').length;
+
+  const worker = getWorkerStatus();
+  const alerts = checkAlerts();
+
+  // SLO met: at least 1 run in last 24h AND no critical alerts AND worker running
+  const sloMet = totalRuns > 0 && !alerts.some(a => a.level === 'critical') && worker.isRunning;
+
+  res.json({
+    sloMet,
+    period: '24h',
+    totalRuns,
+    okRuns,
+    degradedRuns,
+    failedRuns,
+    uptimeSec: worker.startedAt ? Math.round((Date.now() - new Date(worker.startedAt).getTime()) / 1000) : 0,
+    workerRunning: worker.isRunning,
+    currentMode: getCurrentMode(),
+    alertCount: alerts.length,
+    alerts,
+    runs: runs.map(r => ({
+      runId: r.run_id,
+      startedAt: r.started_at,
+      finishedAt: r.finished_at,
+      status: r.status,
+      coveragePct: r.coverage_pct,
+      rankedOk: r.ranked_ok,
+      universeTotal: r.universe_total,
+      degraded: !!r.degraded,
+    })),
   });
 });
 
