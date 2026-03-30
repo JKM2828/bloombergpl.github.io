@@ -229,9 +229,23 @@ router.get('/picks/daily', (req, res) => {
   const data = getDailyPicks({ assetTypes, limit });
   const rankedAt = data.rankedAt || null;
   const dataAgeSec = rankedAt ? Math.round((Date.now() - new Date(rankedAt).getTime()) / 1000) : null;
+
+  // Freshness gate: during market hours, flag data older than 10 min
+  const FRESHNESS_GATE_SEC = 600;
+  const isMarket = getCurrentMode() === 'market';
+  const stale = isMarket && dataAgeSec != null && dataAgeSec > FRESHNESS_GATE_SEC;
+
+  // Coverage from latest pipeline run
+  const latestRun = getLatestPipelineRun();
+  const coveragePct = latestRun?.coverage_pct ?? null;
+  const coverageOk = coveragePct === null || coveragePct >= 95;
+
   res.json({
     ...data,
     dataAgeSec,
+    stale,
+    coveragePct,
+    coverageOk,
     disclaimer: 'Dzienne Top picks – analiza algorytmiczna, nie stanowi porady inwestycyjnej.',
   });
 });

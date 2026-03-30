@@ -60,13 +60,21 @@ function isTickerFresh(ticker) {
   const lastDate = new Date(row.date);
   const now = new Date();
 
-  // Calendar-day logic for daily candles (works both in and out of market hours)
+  // Use Warsaw timezone for day-of-week (Heroku runs UTC)
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const jan = new Date(now.getFullYear(), 0, 1).getTimezoneOffset();
+  const jul = new Date(now.getFullYear(), 6, 1).getTimezoneOffset();
+  const isDST = now.getTimezoneOffset() < Math.max(jan, jul);
+  const warsawOffset = isDST ? 2 : 1;
+  const warsaw = new Date(utc + warsawOffset * 3600000);
+  const dow = warsaw.getDay(); // 0=Sun, 6=Sat
+
+  // Calendar-day logic for daily candles
   const diffDays = Math.floor((now - lastDate) / 86400000);
   if (diffDays <= 0) return true; // same day
   if (diffDays === 1) return true; // yesterday
-  const dow = now.getDay();
-  if (dow === 6 && diffDays <= 1) return true; // Saturday → Friday ok
-  if (dow === 0 && diffDays <= 2) return true; // Sunday → Friday ok
+  if (dow === 6 && diffDays <= 2) return true; // Saturday → Friday ok
+  if (dow === 0 && diffDays <= 3) return true; // Sunday → Friday ok
   if (dow === 1 && diffDays <= 3) return true; // Monday → Friday ok
   return false;
 }

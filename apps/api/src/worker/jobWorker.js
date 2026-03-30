@@ -24,6 +24,25 @@ const { runScreener, getDailyPicks, saveDailyPicks, validatePastPicks, getPickSt
 const TIMEZONE = 'Europe/Warsaw';
 
 // ============================================================
+// JOB TIMEOUTS — auto-recover stuck jobs
+// ============================================================
+const JOB_TIMEOUTS = {
+  full_pipeline: 10 * 60 * 1000,  // 10 min
+  ingest:        5 * 60 * 1000,   // 5 min
+  analysis:      8 * 60 * 1000,   // 8 min
+  train:         15 * 60 * 1000,  // 15 min
+  screener:      2 * 60 * 1000,   // 2 min
+  features:      3 * 60 * 1000,   // 3 min
+  predict:       3 * 60 * 1000,   // 3 min
+  intraday5m:    3 * 60 * 1000,   // 3 min
+};
+const DEFAULT_JOB_TIMEOUT = 5 * 60 * 1000;
+
+function getJobTimeout(jobType) {
+  return JOB_TIMEOUTS[jobType] || DEFAULT_JOB_TIMEOUT;
+}
+
+// ============================================================
 // PRECISION KPI — tracks model quality over time
 // Auto-retrains when precision@1D drops below threshold.
 // ============================================================
@@ -164,6 +183,29 @@ function markJobFailed(jobId, error) {
   const job = queryOne('SELECT * FROM jobs WHERE id = ?', [jobId]);
   if (job && job.retries < 3) {
     run("UPDATE jobs SET status = 'pending', finished_at = NULL WHERE id = ?", [jobId]);
+  }
+}
+
+/**
+ * Recover jobs stuck in 'running' state longer than their timeout.
+ * Called before each drain cycle to prevent permanent queue blockage.
+ */
+function recoverStuckJobs() {
+  const stuckJobs = query(
+    "SELECT id, job_type, started_at FROM jobs WHERE status = 'running'"
+  );
+  for (const job of stuckJobs) {
+    if (!job.started_at) continue;
+    const startedAt = new Date(job.started_at.endsWith('Z') ? job.started_at : job.started_at + 'Z').getTime();
+    const elapsed = Date.now() - startedAt;
+    const timeout = getJobTimeout(job.job_type);
+    if (elapsed > timeout) {
+      console.warn(`[worker] ⏰ Job ${job.id} (${job.job_type}) timed out after ${Math.round(elapsed / 1000)}s — resetting`);
+      run("UPDATE jobs SET status = 'failed', finished_at = datetime('now'), error = ? WHERE id = ?",
+        [`Timeout after ${Math.round(elapsed / 1000)}s`, job.id]);
+      runningLocks.delete(job.job_type);
+      saveDb();
+    }
   }
 }
 
@@ -376,7 +418,11 @@ async function processNextJob() {
 
   try {
     const payload = job.payload ? JSON.parse(job.payload) : {};
-    await processor(payload);
+    const jobTimeout = getJobTimeout(job.job_type);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Job execution timeout after ${jobTimeout / 1000}s`)), jobTimeout)
+    );
+    await Promise.race([processor(payload), timeoutPromise]);
     markJobDone(job.id);
     stats.jobsProcessed++;
 
@@ -411,6 +457,7 @@ async function processNextJob() {
 }
 
 async function drainQueue() {
+  recoverStuckJobs();
   let processed = 0;
   while (await processNextJob()) {
     processed++;

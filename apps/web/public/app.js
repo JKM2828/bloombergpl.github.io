@@ -124,13 +124,17 @@ async function loadLiveSignals() {
       const gates = picksData.qualityGates || {};
       const dataAgeSec = picksData.dataAgeSec || 0;
       const dataAgeMin = Math.round(dataAgeSec / 60);
-      const staleWarning = dataAgeSec > 3600
+      const staleWarning = picksData.stale
         ? `<div style="background:var(--red);color:#fff;padding:6px 12px;border-radius:6px;margin-bottom:8px;font-size:0.85em">⚠ Dane sprzed ${dataAgeMin} min — ranking może być nieaktualny</div>`
-        : dataAgeSec > 1800
+        : dataAgeSec > 300
           ? `<div style="background:var(--yellow);color:#000;padding:6px 12px;border-radius:6px;margin-bottom:8px;font-size:0.85em">⏳ Dane sprzed ${dataAgeMin} min</div>`
           : '';
+      const coverageWarning = picksData.coveragePct != null && !picksData.coverageOk
+        ? `<div style="background:var(--yellow);color:#000;padding:6px 12px;border-radius:6px;margin-bottom:8px;font-size:0.85em">⚠ Pokrycie: ${picksData.coveragePct}% (min 95%)</div>`
+        : '';
       el.innerHTML = `
         ${staleWarning}
+        ${coverageWarning}
         <div style="font-size:0.75em;color:var(--text-muted);margin-bottom:8px">
           Reżim: <strong>${picksData.regime}</strong> |
           Przeskanowano: ${picksData.totalScreened || '—'} |
@@ -308,11 +312,24 @@ async function loadDashSignal() {
 async function loadDashWorker() {
   try {
     const data = await api('/worker/status');
+    const run = data.lastPipelineRun;
+    const runInfo = run
+      ? `<p>Pipeline: <strong>${run.status}</strong> | Pokrycie: <strong>${run.coveragePct || '—'}%</strong>${run.degraded ? ' <span style="color:var(--red)">(degraded)</span>' : ''}</p>
+         <p style="font-size:0.8em">Run: ${run.runId || '—'} | ${run.finishedAt || run.startedAt || '—'}</p>`
+      : '<p style="color:var(--text-muted)">Brak uruchomień pipeline</p>';
+    const ingestAge = data.lastIngest
+      ? Math.round((Date.now() - new Date(data.lastIngest).getTime()) / 60000)
+      : null;
+    const ingestLabel = ingestAge != null
+      ? `<span style="color:${ingestAge > 30 ? 'var(--red)' : ingestAge > 10 ? 'var(--yellow)' : 'var(--green)'}">${ingestAge} min temu</span>`
+      : '<span style="color:var(--red)">brak</span>';
     document.getElementById('dash-worker-status').innerHTML = `
       <div style="font-size:0.9em">
-        <p>Status: <strong style="color:${data.isRunning ? 'var(--green)' : 'var(--red)'}">${data.isRunning ? 'Aktywny' : 'Zatrzymany'}</strong></p>
-        <p>Kolejka: <strong>${data.queueSize}</strong> zadań</p>
-        <p>Przetworzono: <strong>${data.jobsProcessed}</strong></p>
+        <p>Status: <strong style="color:${data.isRunning ? 'var(--green)' : 'var(--red)'}">${data.isRunning ? 'Aktywny' : 'Zatrzymany'}</strong>
+           | Tryb: <strong>${data.currentMode || '—'}</strong></p>
+        <p>Kolejka: <strong>${data.queueSize}</strong> | Przetworzono: <strong>${data.jobsProcessed}</strong> | Błędy: <strong>${data.jobsFailed || 0}</strong></p>
+        <p>Ostatni ingest: ${ingestLabel}</p>
+        ${runInfo}
       </div>
     `;
   } catch { /* ignore */ }
