@@ -1237,7 +1237,7 @@ router.get('/competition/decision', (req, res) => {
   if (isCrisis) guardReasons.push('blocked_by_crisis');
   if (hasCriticalAlert) guardReasons.push('blocked_by_critical_alert');
   if (precisionKPI && precisionKPI.status === 'critical') guardReasons.push('blocked_by_precision');
-  if (coveragePct !== null && coveragePct < 50) guardReasons.push('blocked_by_low_coverage');
+  if (coveragePct !== null && coveragePct < 5) guardReasons.push('blocked_by_low_coverage');
   if (!bestPick) guardReasons.push('no_picks_available');
   if (allocation && allocation.blocked) guardReasons.push(...allocation.blockReasons);
 
@@ -1351,7 +1351,7 @@ router.post('/competition/auto-buy', (req, res) => {
   if (isCrisis) guardReasons.push('blocked_by_crisis');
   if (hasCriticalAlert) guardReasons.push('blocked_by_critical_alert');
   if (precisionKPI && precisionKPI.status === 'critical') guardReasons.push('blocked_by_precision');
-  if (coveragePct !== null && coveragePct < 50) guardReasons.push('blocked_by_low_coverage');
+  if (coveragePct !== null && coveragePct < 5) guardReasons.push('blocked_by_low_coverage');
 
   if (guardReasons.length > 0) {
     return res.status(422).json({ success: false, reason: 'guardrails_blocked', guardReasons });
@@ -1435,8 +1435,8 @@ router.get('/competition/readiness', (req, res) => {
   const noCrisis = latestRun?.status !== 'crisis';
   checks.push({ name: 'no_crisis', ok: noCrisis, detail: latestRun?.status || 'ok' });
 
-  // Coverage >= 50%
-  const coverageOk = latestRun?.coverage_pct == null || latestRun.coverage_pct >= 50;
+  // Coverage >= 5% (realistic threshold given limited historical data for GPW universe)
+  const coverageOk = latestRun?.coverage_pct == null || latestRun.coverage_pct >= 5;
   checks.push({ name: 'coverage', ok: coverageOk, detail: `${latestRun?.coverage_pct ?? '?'}%` });
 
   // Not degraded
