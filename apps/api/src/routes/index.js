@@ -12,6 +12,7 @@ const { ALL_INSTRUMENTS, sma, ema, rsi, volatility, maxDrawdown } = require('../
 const { computeAllFeatures, getLatestFeatures } = require('../ml/featureEngineering');
 const { predictAll, getLatestPredictions, getLatestPrediction, trainAll } = require('../ml/mlEngine');
 const { backtestAll } = require('../ml/backtest');
+const { trainT1Model, predictTopGainersT1, validateT1Predictions, backtestT1, getT1KPI, getLatestTopGainersT1, loadT1Model } = require('../ml/topGainersT1');
 const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStopLevels, computeSellLevels, getSellCandidates, getCompetitionSellCandidates, RISK_CONFIG } = require('../ml/riskEngine');
 const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI, getLatestPipelineRun, getPipelineRunById, checkAlerts } = require('../worker/jobWorker');
 const { getLastCycleStats } = require('../ingest/ingestPipeline');
@@ -403,6 +404,73 @@ router.post('/picks/validate', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ============================================================
+// Top Gainers T+1 — "Które spółki jutro urosnąć najwięcej?"
+// Dedicated T+1 ranking model, separate from daily picks.
+// ============================================================
+router.get('/top-gainers', (req, res) => {
+  const limit = parseInt(req.query.limit) || 5;
+  const data = getLatestTopGainersT1(limit);
+  const kpi = getT1KPI(30);
+  res.json({
+    ...data,
+    kpi,
+    disclaimer: 'Top Gainers T+1 — prognoza algorytmiczna największych wzrostów na jutro. Nie stanowi porady inwestycyjnej.',
+  });
+});
+
+router.post('/top-gainers/predict', (req, res) => {
+  try {
+    const topN = parseInt(req.query.top) || 5;
+    const predictions = predictTopGainersT1(topN);
+    res.json({
+      message: `Wygenerowano ranking Top ${topN} na jutro`,
+      count: predictions.length,
+      predictions,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/top-gainers/train', (req, res) => {
+  try {
+    const result = trainT1Model({ lookback: parseInt(req.query.lookback) || 300 });
+    if (!result) return res.json({ message: 'Za mało danych do treningu T+1', result: null });
+    res.json({ message: 'Model T+1 wytrenowany', ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/top-gainers/backtest', (req, res) => {
+  try {
+    const result = backtestT1({
+      trainDays: parseInt(req.query.trainDays) || 120,
+      step: parseInt(req.query.step) || 5,
+    });
+    res.json({ message: 'Backtest T+1 zakończony', ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/top-gainers/validate', (req, res) => {
+  try {
+    const result = validateT1Predictions();
+    res.json({ message: `Zwalidowano ${result.validated} prognoz T+1`, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/top-gainers/kpi', (req, res) => {
+  const days = parseInt(req.query.days) || 30;
+  const kpi = getT1KPI(days);
+  if (!kpi) return res.json({ message: 'Brak danych KPI T+1', kpi: null });
+  res.json({ days, kpi });
 });
 
 // ============================================================

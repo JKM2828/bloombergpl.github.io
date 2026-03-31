@@ -54,8 +54,9 @@ function computeFeatures(ticker, opts = {}) {
        bb_upper, bb_middle, bb_lower, atr14, obv, vol_20d,
        momentum_1m, momentum_3m, momentum_6m, volume_ratio, max_dd_60d, regime,
        pivot_r2, pivot_r1, pivot_pp, pivot_s1, pivot_s2,
-       vwap_proxy, momentum_5d, momentum_10d)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       vwap_proxy, momentum_5d, momentum_10d,
+       gap_pct, range_expansion, vol_accel, close_position, upper_shadow_pct, body_pct)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [ticker, c.date,
        feat.sma20, feat.sma50, feat.sma200, feat.ema12, feat.ema26,
        feat.rsi14, feat.rsi7, feat.macd, feat.macd_signal, feat.macd_hist,
@@ -63,7 +64,9 @@ function computeFeatures(ticker, opts = {}) {
        feat.momentum_1m, feat.momentum_3m, feat.momentum_6m,
        feat.volume_ratio, feat.max_dd_60d, feat.regime,
        feat.pivot_r2, feat.pivot_r1, feat.pivot_pp, feat.pivot_s1, feat.pivot_s2,
-       feat.vwap_proxy, feat.momentum_5d, feat.momentum_10d]
+       feat.vwap_proxy, feat.momentum_5d, feat.momentum_10d,
+       feat.gap_pct, feat.range_expansion, feat.vol_accel,
+       feat.close_position, feat.upper_shadow_pct, feat.body_pct]
     );
     inserted++;
   }
@@ -154,6 +157,36 @@ function computeSingleBar(slice, idx, allCandles) {
   const mom5d = len >= 6 ? (last.close - slice[len - 6].close) / slice[len - 6].close : null;
   const mom10d = len >= 11 ? (last.close - slice[len - 11].close) / slice[len - 11].close : null;
 
+  // ---- T+1 Impulse Features ----
+  // Gap: open vs previous close (reuses prevBar from Pivots above)
+  const gapPct = prevBar ? (last.open - prevBar.close) / prevBar.close : null;
+
+  // Range expansion: today's range vs 5D avg range
+  const todayRange = last.high - last.low;
+  let rangeExpansion = null;
+  if (len >= 6) {
+    const avgRange5 = slice.slice(-6, -1).reduce((s, c) => s + (c.high - c.low), 0) / 5;
+    rangeExpansion = avgRange5 > 0 ? todayRange / avgRange5 : null;
+  }
+
+  // Volume acceleration: today's vol_ratio vs yesterday's vol_ratio
+  let volAccel = null;
+  if (len >= 31 && prevBar) {
+    const prevVol10 = slice.slice(-11, -1).reduce((s, c) => s + c.volume, 0) / 10;
+    const prevVol30 = slice.slice(-Math.min(31, len), -1).reduce((s, c) => s + c.volume, 0) / Math.min(30, len - 1);
+    const prevVR = prevVol30 > 0 ? prevVol10 / prevVol30 : 1;
+    volAccel = prevVR > 0 ? volumeRatio / prevVR : null;
+  }
+
+  // Close position within day's range (0=low, 1=high) — bullish if near high
+  const closePos = todayRange > 0 ? (last.close - last.low) / todayRange : 0.5;
+
+  // Upper shadow as % of range (small = buyers in control)
+  const upperShadow = todayRange > 0 ? (last.high - Math.max(last.open, last.close)) / todayRange : 0;
+
+  // Body as % of range (large = decisive move)
+  const bodyPct = todayRange > 0 ? Math.abs(last.close - last.open) / todayRange : 0;
+
   return {
     sma20: r(sma20Val), sma50: r(sma50Val), sma200: r(sma200Val),
     ema12: r(ema12Val), ema26: r(ema26Val),
@@ -167,6 +200,8 @@ function computeSingleBar(slice, idx, allCandles) {
     pivot_s1: r(pivotS1), pivot_s2: r(pivotS2),
     vwap_proxy: r(vwapProxy),
     momentum_5d: r(mom5d), momentum_10d: r(mom10d),
+    gap_pct: r(gapPct), range_expansion: r(rangeExpansion), vol_accel: r(volAccel),
+    close_position: r(closePos), upper_shadow_pct: r(upperShadow), body_pct: r(bodyPct),
   };
 }
 
@@ -241,6 +276,9 @@ function computeAllFeatures(opts = {}) {
 
   // Third pass: sector-relative strength
   computeSectorRelativeStrength();
+
+  // Fourth pass: cross-sectional ranks for T+1 model
+  computeCrossSectionalRanks();
 
   console.log(`[features] Total new features: ${total}`);
   return total;
@@ -317,6 +355,54 @@ function computeSectorRelativeStrength() {
     run(
       'UPDATE features SET sector_rs = ? WHERE ticker = ? AND date = (SELECT MAX(date) FROM features WHERE ticker = ?)',
       [sectorRs, inst.ticker, inst.ticker]
+    );
+  }
+  saveDb();
+}
+
+/**
+ * Cross-sectional ranks: percentile of 1D momentum, volume ratio, and
+ * relative strength across all active tickers on the same (latest) date.
+ * Stored as 0-1 rank (1 = best in universe).
+ */
+function computeCrossSectionalRanks() {
+  const instruments = query("SELECT ticker FROM instruments WHERE active = 1 AND type IN ('STOCK','ETF','FUTURES')");
+
+  // Gather latest feature row per ticker
+  const rows = [];
+  for (const inst of instruments) {
+    const feat = queryOne(
+      'SELECT ticker, momentum_5d, volume_ratio, relative_strength FROM features WHERE ticker = ? ORDER BY date DESC LIMIT 1',
+      [inst.ticker]
+    );
+    if (feat) rows.push(feat);
+  }
+
+  if (rows.length < 2) return;
+
+  // Rank helper: returns percentile 0-1 (1 = highest)
+  function percentileRank(arr, key) {
+    const sorted = [...arr].filter(a => a[key] != null).sort((a, b) => a[key] - b[key]);
+    const n = sorted.length;
+    for (let i = 0; i < n; i++) {
+      sorted[i][key + '_rank'] = n > 1 ? i / (n - 1) : 0.5;
+    }
+  }
+
+  percentileRank(rows, 'momentum_5d');
+  percentileRank(rows, 'volume_ratio');
+  percentileRank(rows, 'relative_strength');
+
+  for (const row of rows) {
+    run(
+      `UPDATE features SET mom1d_rank = ?, vol_rank = ?, rs_rank = ?
+       WHERE ticker = ? AND date = (SELECT MAX(date) FROM features WHERE ticker = ?)`,
+      [
+        r(row.momentum_5d_rank ?? null),
+        r(row.volume_ratio_rank ?? null),
+        r(row.relative_strength_rank ?? null),
+        row.ticker, row.ticker,
+      ]
     );
   }
   saveDb();

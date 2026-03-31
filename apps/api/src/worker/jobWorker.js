@@ -20,6 +20,7 @@ const { computeAllFeatures } = require('../ml/featureEngineering');
 const { trainAll, predictAll } = require('../ml/mlEngine');
 const { generateAllSignals } = require('../ml/riskEngine');
 const { runScreener, getDailyPicks, saveDailyPicks, validatePastPicks, getPickStats } = require('../screener/rankingService');
+const { trainT1Model, predictTopGainersT1, validateT1Predictions, loadT1Model } = require('../ml/topGainersT1');
 
 const TIMEZONE = 'Europe/Warsaw';
 
@@ -35,6 +36,8 @@ const JOB_TIMEOUTS = {
   features:      3 * 60 * 1000,   // 3 min
   predict:       3 * 60 * 1000,   // 3 min
   intraday5m:    3 * 60 * 1000,   // 3 min
+  train_t1:      10 * 60 * 1000,  // 10 min
+  predict_t1:    3 * 60 * 1000,   // 3 min
 };
 const DEFAULT_JOB_TIMEOUT = 5 * 60 * 1000;
 
@@ -254,6 +257,20 @@ const processors = {
     stats.lastScreener = new Date().toISOString();
   },
 
+  async train_t1(payload) {
+    const result = trainT1Model(payload);
+    stats.lastTrainT1 = new Date().toISOString();
+    if (result) console.log(`[worker] T+1 model trained: precision@5=${result.precision5}%`);
+  },
+
+  async predict_t1(_payload) {
+    loadT1Model();
+    const predictions = predictTopGainersT1(5);
+    validateT1Predictions();
+    stats.lastPredictT1 = new Date().toISOString();
+    console.log(`[worker] T+1 predictions: ${predictions.length} tickers ranked`);
+  },
+
   /**
    * Continuous analysis pipeline — runs after each successful ingest.
    * Chains: features → predict → signals → screener → picks.
@@ -370,6 +387,18 @@ const processors = {
         console.warn(`[worker] Degraded mode — screener ran but coverage low (${cycleStats?.liveCoveragePct}%)`);
       }
       console.log(`[worker] Daily picks: ${picksData.picks.map(p => p.ticker).join(', ') || '(none passed gates)'}`);
+
+      // ---- T+1 TOP GAINERS (alongside daily picks) ----
+      try {
+        loadT1Model();
+        const t1Preds = predictTopGainersT1(5);
+        validateT1Predictions();
+        if (t1Preds.length > 0) {
+          console.log(`[worker] Top Gainers T+1: ${t1Preds.map(p => `${p.ticker}(${p.predictedReturn1D}%)`).join(', ')}`);
+        }
+      } catch (t1Err) {
+        console.error(`[worker] T+1 prediction failed: ${t1Err.message}`);
+      }
 
       // Precision KPI check
       const kpi = checkPrecisionKPI();

@@ -314,6 +314,52 @@ async function migrate() {
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_comp_port_status ON competition_portfolio(status)`);
 
+  // ---- T+1 Top Gainers predictions ----
+  db.run(`
+    CREATE TABLE IF NOT EXISTS top_gainers_t1 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      prediction_date TEXT NOT NULL,
+      ticker TEXT NOT NULL,
+      rank INTEGER NOT NULL,
+      predicted_return_1d REAL,
+      top5_probability REAL,
+      composite_score REAL,
+      model_version TEXT,
+      actual_return_1d REAL,
+      actual_rank INTEGER,
+      validated INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(prediction_date, ticker)
+    )
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_top_gainers_date ON top_gainers_t1(prediction_date DESC)`);
+
+  // ---- T+1 model precision tracking ----
+  db.run(`
+    CREATE TABLE IF NOT EXISTS top_gainers_kpi (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      eval_date TEXT NOT NULL,
+      precision_at_5 REAL,
+      hit_at_1 REAL,
+      avg_return_top5 REAL,
+      avg_actual_rank_top5 REAL,
+      total_universe INTEGER,
+      model_version TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_tg_kpi_date ON top_gainers_kpi(eval_date DESC)`);
+
+  // New impulse feature columns for T+1 prediction
+  const t1FeatureCols = [
+    "gap_pct REAL", "range_expansion REAL", "vol_accel REAL",
+    "close_position REAL", "upper_shadow_pct REAL", "body_pct REAL",
+    "mom1d_rank REAL", "vol_rank REAL", "rs_rank REAL",
+  ];
+  for (const col of t1FeatureCols) {
+    try { db.run(`ALTER TABLE features ADD COLUMN ${col}`); } catch(e) { /* exists */ }
+  }
+
   saveDb();
   console.log('[migrate] Database schema created / verified.');
 }

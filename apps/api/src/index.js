@@ -15,6 +15,7 @@ const { seed } = require('./db/seed');
 const routes = require('./routes');
 const { startScheduler } = require('./worker/jobWorker');
 const { loadModelsFromDb } = require('./ml/mlEngine');
+const { loadT1Model } = require('./ml/topGainersT1');
 const { attachWebSocket } = require('./ws/liveCandles');
 
 const PORT = process.env.PORT || 3001;
@@ -123,6 +124,7 @@ app.get('/', (req, res) => {
 
   // Load previously trained ML models from DB
   loadModelsFromDb();
+  loadT1Model();
 
   // Start the 24/7 background worker scheduler
   startScheduler();
