@@ -235,10 +235,14 @@ router.get('/picks/daily', (req, res) => {
   const isMarket = getCurrentMode() === 'market';
   const stale = isMarket && dataAgeSec != null && dataAgeSec > FRESHNESS_GATE_SEC;
 
-  // Coverage from latest pipeline run
+  // Coverage from latest pipeline run — bind to same run_id as today endpoint
   const latestRun = getLatestPipelineRun();
   const coveragePct = latestRun?.coverage_pct ?? null;
   const coverageOk = coveragePct === null || coveragePct >= 95;
+  const isCrisis = latestRun?.status === 'crisis';
+
+  // X-Generated-At header for frontend freshness detection
+  res.setHeader('X-Generated-At', rankedAt || new Date().toISOString());
 
   res.json({
     ...data,
@@ -246,6 +250,14 @@ router.get('/picks/daily', (req, res) => {
     stale,
     coveragePct,
     coverageOk,
+    crisis: isCrisis,
+    pipelineRun: {
+      runId: latestRun?.run_id || null,
+      rankedAt,
+      coveragePct,
+      degraded: !!latestRun?.degraded,
+      status: latestRun?.status || null,
+    },
     disclaimer: 'Dzienne Top picks – analiza algorytmiczna, nie stanowi porady inwestycyjnej.',
   });
 });
@@ -362,18 +374,23 @@ router.get('/today', (req, res) => {
 
   // Unified run state metadata
   const latestRunForToday = getLatestPipelineRun();
+  const isCrisisToday = latestRunForToday?.status === 'crisis';
   const picksRunMeta = {
     runId: latestRunForToday?.run_id || null,
     rankedAt: picksData.rankedAt || null,
     coveragePct: latestRunForToday?.coverage_pct ?? null,
     degraded: !!latestRunForToday?.degraded,
+    status: latestRunForToday?.status || null,
   };
+
+  res.setHeader('X-Generated-At', picksData.rankedAt || new Date().toISOString());
 
   res.json({
     date: new Date().toISOString().slice(0, 10),
     regime: picksData.regime,
     count: actions.length,
     actions: actions.slice(0, limit),
+    crisis: isCrisisToday,
     pipelineRun: picksRunMeta,
     disclaimer: 'Sygnały dnia — analiza algorytmiczna, nie stanowi porady inwestycyjnej. Inwestowanie wiąże się z ryzykiem.',
   });
@@ -830,13 +847,16 @@ router.get('/kpi/precision', (req, res) => {
 router.get('/sell/candidates', (req, res) => {
   const candidates = getSellCandidates();
   const latestRunForSell = getLatestPipelineRun();
+  res.setHeader('X-Generated-At', latestRunForSell?.started_at || new Date().toISOString());
   res.json({
     count: candidates.length,
     candidates,
+    crisis: latestRunForSell?.status === 'crisis',
     pipelineRun: {
       runId: latestRunForSell?.run_id || null,
       rankedAt: latestRunForSell?.started_at || null,
       coveragePct: latestRunForSell?.coverage_pct ?? null,
+      status: latestRunForSell?.status || null,
     },
     disclaimer: 'Sygnały sprzedaży – analiza algorytmiczna, nie stanowi porady inwestycyjnej.',
   });
@@ -1188,9 +1208,11 @@ router.get('/competition/sell-candidates', (req, res) => {
   res.json({
     count: candidates.length,
     candidates,
+    crisis: latestRunForComp?.status === 'crisis',
     pipelineRun: {
       runId: latestRunForComp?.run_id || null,
       rankedAt: latestRunForComp?.started_at || null,
+      status: latestRunForComp?.status || null,
     },
     disclaimer: 'Sygnały sprzedaży dla portfela konkursowego — analiza algorytmiczna.',
   });

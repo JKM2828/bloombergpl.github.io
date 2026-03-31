@@ -270,7 +270,24 @@ const processors = {
     createPipelineRun(runId, universeTotal);
 
     const cycleStats = getLastCycleStats();
-    const degraded = cycleStats && cycleStats.liveCoveragePct < 80;
+    const coveragePct = cycleStats?.liveCoveragePct;
+    const degraded = coveragePct != null && coveragePct < 80;
+    const crisis = coveragePct != null && coveragePct < 60;
+
+    // ---- CRISIS GUARD: halt analysis if coverage dangerously low ----
+    if (crisis) {
+      console.error(`[worker] 🚨 CRISIS: ingest coverage ${coveragePct}% < 60% — halting analysis, using last-known-good picks`);
+      updatePipelineRun(runId, {
+        finished_at: new Date().toISOString(),
+        status: 'crisis',
+        coverage_pct: coveragePct,
+        degraded: 1,
+        summary: JSON.stringify({ crisis: true, coveragePct, reason: 'Coverage below 60% crisis threshold' }),
+      });
+      stats.lastAnalysisCycle = new Date().toISOString();
+      stats.analysisRuns++;
+      return;
+    }
 
     // ---- FEATURES ----
     let featuresOk = 0;
@@ -362,7 +379,7 @@ const processors = {
     }
 
     // ---- Finalize run ----
-    const coveragePct = universeTotal > 0 ? Math.round((rankedOk / universeTotal) * 1000) / 10 : 0;
+    const rankCoveragePct = universeTotal > 0 ? Math.round((rankedOk / universeTotal) * 1000) / 10 : 0;
     updatePipelineRun(runId, {
       finished_at: new Date().toISOString(),
       status: 'completed',
@@ -370,17 +387,17 @@ const processors = {
       features_ok: featuresOk,
       predicted_ok: predictedOk,
       ranked_ok: rankedOk,
-      coverage_pct: coveragePct,
+      coverage_pct: rankCoveragePct,
       degraded: degraded ? 1 : 0,
       summary: JSON.stringify({
-        featuresOk, predictedOk, rankedOk, universeTotal, coveragePct, degraded,
+        featuresOk, predictedOk, rankedOk, universeTotal, coveragePct: rankCoveragePct, degraded,
         ingestCoverage: cycleStats?.liveCoveragePct || null,
       }),
     });
 
     stats.lastAnalysisCycle = new Date().toISOString();
     stats.analysisRuns++;
-    console.log(`[worker] Analysis pipeline complete (run_id=${runId}, run #${stats.analysisRuns}, ranked=${rankedOk}/${universeTotal}, coverage=${coveragePct}%, degraded=${degraded})`);
+    console.log(`[worker] Analysis pipeline complete (run_id=${runId}, run #${stats.analysisRuns}, ranked=${rankedOk}/${universeTotal}, coverage=${rankCoveragePct}%, degraded=${degraded})`);
   },
 
   async full_pipeline(_payload) {
@@ -633,6 +650,21 @@ function checkAlerts() {
   const lastCycle = require('../ingest/ingestPipeline').getLastCycleStats();
   if (lastCycle && lastCycle.liveCoveragePct < ALERT_THRESHOLDS.minIngestCoveragePct) {
     alerts.push({ level: 'warning', type: 'low_coverage', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < ${ALERT_THRESHOLDS.minIngestCoveragePct}%` });
+  }
+
+  // Crisis coverage check
+  if (lastCycle && lastCycle.liveCoveragePct < 60) {
+    alerts.push({ level: 'critical', type: 'crisis_coverage', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < 60% — analysis halted (crisis mode)` });
+  }
+
+  // Precision KPI check
+  const kpi = lastPrecisionCheck;
+  if (kpi && kpi.precision1D != null) {
+    if (kpi.precision1D < PRECISION_RETRAIN_THRESHOLD) {
+      alerts.push({ level: 'critical', type: 'precision_critical', message: `Model precision@1D=${kpi.precision1D}% < ${PRECISION_RETRAIN_THRESHOLD}%` });
+    } else if (kpi.precision1D < PRECISION_WARN_THRESHOLD) {
+      alerts.push({ level: 'warning', type: 'precision_warn', message: `Model precision@1D=${kpi.precision1D}% < ${PRECISION_WARN_THRESHOLD}%` });
+    }
   }
 
   // Log critical alerts

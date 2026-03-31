@@ -86,7 +86,8 @@ async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
       lastErr = err;
       if (RETRY_NON_RETRYABLE.has(err.code)) throw err; // fast-fail
       if (attempt < maxRetries) {
-        const delay = baseDelayMs * Math.pow(2, attempt); // 500ms, 1000ms
+        const jitter = Math.random() * baseDelayMs * 0.5; // 0-250ms jitter
+        const delay = baseDelayMs * Math.pow(2, attempt) + jitter;
         await new Promise(r => setTimeout(r, delay));
       }
     }

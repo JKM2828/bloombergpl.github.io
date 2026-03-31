@@ -4,6 +4,9 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '..', '..', '..', '.env') });
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
 const path = require('path');
 const http = require('http');
 const { initDb, startAutoSave } = require('./db/connection');
@@ -18,15 +21,36 @@ const PORT = process.env.PORT || 3001;
 const app = express();
 
 // ---- Middleware ----
+app.use(helmet({
+  contentSecurityPolicy: false,   // allow inline scripts in frontend
+  crossOriginEmbedderPolicy: false,
+}));
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Request logging
+// Rate limiting — 120 req/min per IP (generous for dashboard polling)
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+});
+app.use('/api', apiLimiter);
+
+// X-Request-ID — trace every request
+app.use((req, res, next) => {
+  req.id = req.headers['x-request-id'] || crypto.randomUUID();
+  res.setHeader('X-Request-ID', req.id);
+  next();
+});
+
+// Request logging with request-id
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     const ms = Date.now() - start;
-    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms`);
+    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms [${req.id}]`);
   });
   next();
 });

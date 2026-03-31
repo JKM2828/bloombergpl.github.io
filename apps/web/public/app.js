@@ -316,10 +316,14 @@ async function loadDashWorker() {
       api('/alerts').catch(() => ({ count: 0, alerts: [], status: 'ok' })),
     ]);
     const run = data.lastPipelineRun;
+    const isCrisis = run?.status === 'crisis';
     const runInfo = run
-      ? `<p>Pipeline: <strong>${run.status}</strong> | Pokrycie: <strong>${run.coveragePct || '—'}%</strong>${run.degraded ? ' <span style="color:var(--red)">(degraded)</span>' : ''}</p>
+      ? `<p>Pipeline: <strong style="${isCrisis ? 'color:var(--red)' : ''}">${run.status}${isCrisis ? ' 🚨' : ''}</strong> | Pokrycie: <strong>${run.coveragePct || '—'}%</strong>${run.degraded ? ' <span style="color:var(--red)">(degraded)</span>' : ''}</p>
          <p style="font-size:0.8em">Run: ${run.runId || '—'} | ${run.finishedAt || run.startedAt || '—'}</p>`
       : '<p style="color:var(--text-muted)">Brak uruchomień pipeline</p>';
+    const crisisBanner = isCrisis
+      ? '<div style="background:var(--red);color:#fff;padding:6px 10px;border-radius:4px;margin-top:6px;font-weight:bold">🚨 CRISIS: Pokrycie danych <60% — analiza wstrzymana, wyświetlane ostatnie znane wyniki</div>'
+      : '';
     const ingestAge = data.lastIngest
       ? Math.round((Date.now() - new Date(data.lastIngest).getTime()) / 60000)
       : null;
@@ -336,6 +340,7 @@ async function loadDashWorker() {
         <p>Kolejka: <strong>${data.queueSize}</strong> | Przetworzono: <strong>${data.jobsProcessed}</strong> | Błędy: <strong>${data.jobsFailed || 0}</strong></p>
         <p>Ostatni ingest: ${ingestLabel}</p>
         ${runInfo}
+        ${crisisBanner}
         ${alertBanner}
       </div>
     `;
