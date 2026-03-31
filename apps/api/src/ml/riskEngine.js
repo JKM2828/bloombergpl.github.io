@@ -606,6 +606,90 @@ function getCompetitionSellCandidates() {
   return candidates;
 }
 
+// ============================================================
+// COMPETITION ALLOCATION — fixed budget position sizing
+// Computes optimal shares for a pick given a fixed budget (e.g. 20 000 PLN).
+// Applies Kelly-fraction, type-aware limits, and guardrail checks.
+// ============================================================
+
+const COMPETITION_DEFAULTS = {
+  budget: 20000,
+  maxPositionPct: 1.0,        // competition = concentrated, allow up to 100%
+  futuresMaxPct: 0.60,        // futures capped at 60% of budget
+  minConfidence: 0.30,
+  minExpectedReturn: 0.003,
+  minCompositeScore: 25,
+};
+
+/**
+ * Compute allocation for a single competition pick.
+ * @param {object} pick — daily pick object (from getDailyPicks)
+ * @param {object} opts — { budget }
+ * @returns {{ shares, investedAmount, allocPct, reason, blocked, blockReasons }}
+ */
+function computeCompetitionAllocation(pick, opts = {}) {
+  const budget = opts.budget || COMPETITION_DEFAULTS.budget;
+  const blockReasons = [];
+
+  if (!pick) return { shares: 0, investedAmount: 0, allocPct: 0, blocked: true, blockReasons: ['no_pick'] };
+
+  const price = pick.metrics?.lastClose || pick.entryPrice;
+  if (!price || price <= 0) {
+    return { shares: 0, investedAmount: 0, allocPct: 0, blocked: true, blockReasons: ['no_price_data'] };
+  }
+
+  const confidence = (pick.ml?.confidence || 0) / 100;  // ml.confidence is already in %
+  const expectedReturn = (pick.ml?.expectedReturn || 0) / 100;
+  const compositeScore = pick.compositeScore || 0;
+  const isFutures = pick.type === 'FUTURES';
+
+  // Guardrails
+  if (confidence < COMPETITION_DEFAULTS.minConfidence) {
+    blockReasons.push(`confidence_low_${(confidence * 100).toFixed(0)}pct`);
+  }
+  if (expectedReturn < COMPETITION_DEFAULTS.minExpectedReturn) {
+    blockReasons.push(`expected_return_low_${(expectedReturn * 100).toFixed(1)}pct`);
+  }
+  if (compositeScore < COMPETITION_DEFAULTS.minCompositeScore) {
+    blockReasons.push(`score_low_${compositeScore}`);
+  }
+  if (pick.ml?.direction === 'SELL') {
+    blockReasons.push('direction_sell');
+  }
+
+  if (blockReasons.length > 0) {
+    return { shares: 0, investedAmount: 0, allocPct: 0, blocked: true, blockReasons, price };
+  }
+
+  // Kelly-based allocation fraction (aggressive for competition)
+  const winProb = Math.min(Math.max(0.5 + confidence / 2, 0.01), 0.99);
+  const avgWin = Math.abs(expectedReturn);
+  const avgLoss = Math.abs(pick.sell?.failSafeStopPct || 6) / 100;
+  const winLossRatio = avgLoss > 0 ? avgWin / avgLoss : 1;
+  const kellyRaw = (winProb * winLossRatio - (1 - winProb)) / (winLossRatio || 1);
+  const kellyFrac = Math.max(kellyRaw * 0.5, 0);  // half-Kelly for competition (more aggressive)
+
+  let allocPct = Math.min(kellyFrac, isFutures ? COMPETITION_DEFAULTS.futuresMaxPct : COMPETITION_DEFAULTS.maxPositionPct);
+  allocPct = Math.max(allocPct, 0.10);  // at least 10% of budget if not blocked
+
+  const investedAmount = Math.floor(budget * allocPct * 100) / 100;
+  const shares = Math.floor(investedAmount / price);
+  const actualInvested = Math.round(shares * price * 100) / 100;
+
+  return {
+    shares,
+    investedAmount: actualInvested,
+    allocPct: r4(allocPct),
+    kellyRaw: r4(kellyRaw),
+    kellyFrac: r4(kellyFrac),
+    price: r4(price),
+    budget,
+    blocked: shares <= 0,
+    blockReasons: shares <= 0 ? ['shares_zero_after_rounding'] : [],
+    isFutures,
+  };
+}
+
 module.exports = {
   calculatePositionSize,
   calculateStopLevels,
@@ -616,5 +700,7 @@ module.exports = {
   generateSignal,
   generateAllSignals,
   getLatestSignals,
+  computeCompetitionAllocation,
   RISK_CONFIG,
+  COMPETITION_DEFAULTS,
 };

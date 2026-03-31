@@ -13,7 +13,7 @@ const { computeAllFeatures, getLatestFeatures } = require('../ml/featureEngineer
 const { predictAll, getLatestPredictions, getLatestPrediction, trainAll } = require('../ml/mlEngine');
 const { backtestAll } = require('../ml/backtest');
 const { trainT1Model, predictTopGainersT1, validateT1Predictions, backtestT1, getT1KPI, getLatestTopGainersT1, loadT1Model } = require('../ml/topGainersT1');
-const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStopLevels, computeSellLevels, getSellCandidates, getCompetitionSellCandidates, RISK_CONFIG } = require('../ml/riskEngine');
+const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStopLevels, computeSellLevels, getSellCandidates, getCompetitionSellCandidates, computeCompetitionAllocation, RISK_CONFIG, COMPETITION_DEFAULTS } = require('../ml/riskEngine');
 const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI, getLatestPipelineRun, getPipelineRunById, checkAlerts } = require('../worker/jobWorker');
 const { getLastCycleStats } = require('../ingest/ingestPipeline');
 const { assessFeedQuality, assessAllFeedQuality } = require('../ingest/feedMonitor');
@@ -1199,6 +1199,282 @@ router.get('/pipeline/runs', (req, res) => {
     [limit]
   );
   res.json({ count: runs.length, runs });
+});
+
+// ============================================================
+// Competition Decision Payload — aggregated daily pick for contest
+// Returns Top 5 + best #1, allocation for fixed budget, guardrails,
+// data freshness, precision KPI, alerts, and readiness status.
+// ============================================================
+router.get('/competition/decision', (req, res) => {
+  const budget = parseFloat(req.query.budget) || COMPETITION_DEFAULTS.budget;
+
+  // 1. Get daily picks (top 5, all asset types)
+  const picksData = getDailyPicks({ assetTypes: ['STOCK', 'ETF', 'FUTURES'], limit: 5 });
+  const picks = picksData.picks || [];
+
+  // 2. Pipeline run & freshness
+  const latestRun = getLatestPipelineRun();
+  const rankedAt = picksData.rankedAt || null;
+  const dataAgeSec = rankedAt ? Math.round((Date.now() - new Date(rankedAt).getTime()) / 1000) : null;
+  const isCrisis = latestRun?.status === 'crisis';
+  const isDegraded = !!latestRun?.degraded;
+  const coveragePct = latestRun?.coverage_pct ?? null;
+
+  // 3. Precision KPI
+  const precisionKPI = getPrecisionKPI();
+
+  // 4. Alerts
+  const alerts = checkAlerts();
+  const hasCriticalAlert = alerts.some(a => a.level === 'critical');
+
+  // 5. Compute allocation for best pick (#1)
+  const bestPick = picks.length > 0 ? picks[0] : null;
+  const allocation = bestPick ? computeCompetitionAllocation(bestPick, { budget }) : null;
+
+  // 6. Guardrails — determine overall readiness
+  const guardReasons = [];
+  if (isCrisis) guardReasons.push('blocked_by_crisis');
+  if (hasCriticalAlert) guardReasons.push('blocked_by_critical_alert');
+  if (precisionKPI && precisionKPI.status === 'critical') guardReasons.push('blocked_by_precision');
+  if (coveragePct !== null && coveragePct < 50) guardReasons.push('blocked_by_low_coverage');
+  if (!bestPick) guardReasons.push('no_picks_available');
+  if (allocation && allocation.blocked) guardReasons.push(...allocation.blockReasons);
+
+  const ready = guardReasons.length === 0 && bestPick && allocation && !allocation.blocked;
+
+  // 7. Open competition positions (to check duplicates)
+  const openPositions = query(
+    "SELECT ticker, shares, entry_price, entry_date FROM competition_portfolio WHERE status = 'open'"
+  );
+  const alreadyHolding = bestPick ? openPositions.some(p => p.ticker === bestPick.ticker) : false;
+
+  // 8. Enrich top 5 with individual allocations
+  const top5 = picks.map((p, i) => {
+    const alloc = computeCompetitionAllocation(p, { budget });
+    return {
+      rank: i + 1,
+      ticker: p.ticker,
+      name: p.name,
+      type: p.type,
+      sector: p.sector,
+      compositeScore: p.compositeScore,
+      edgeScore: p.edgeScore,
+      ml: p.ml,
+      sell: p.sell,
+      growth: p.growth,
+      relativeStrength: p.relativeStrength,
+      allocation: alloc,
+    };
+  });
+
+  res.json({
+    ready,
+    guardReasons,
+    budget,
+    bestPick: bestPick ? {
+      ticker: bestPick.ticker,
+      name: bestPick.name,
+      type: bestPick.type,
+      sector: bestPick.sector,
+      compositeScore: bestPick.compositeScore,
+      edgeScore: bestPick.edgeScore,
+      ml: bestPick.ml,
+      sell: bestPick.sell,
+      growth: bestPick.growth,
+      relativeStrength: bestPick.relativeStrength,
+      allocation,
+      alreadyHolding,
+    } : null,
+    top5,
+    regime: picksData.regime,
+    freshness: {
+      rankedAt,
+      dataAgeSec,
+      stale: dataAgeSec != null && dataAgeSec > 600,
+    },
+    quality: {
+      coveragePct,
+      degraded: isDegraded,
+      crisis: isCrisis,
+      precisionKPI,
+      alertCount: alerts.length,
+      criticalAlerts: alerts.filter(a => a.level === 'critical'),
+      warnings: alerts.filter(a => a.level === 'warning'),
+    },
+    pipelineRun: {
+      runId: latestRun?.run_id || null,
+      status: latestRun?.status || null,
+      coveragePct,
+      degraded: isDegraded,
+    },
+    disclaimer: 'Decyzja konkursowa — analiza algorytmiczna, nie stanowi porady inwestycyjnej.',
+  });
+});
+
+// ============================================================
+// Competition Auto-Buy — one-click guardrail-validated purchase
+// ============================================================
+router.post('/competition/auto-buy', (req, res) => {
+  const budget = parseFloat(req.body.budget) || COMPETITION_DEFAULTS.budget;
+  const overrideTicker = req.body.ticker;  // optional: force a specific pick
+  const overrideDuplicate = req.body.overrideDuplicate === true;
+
+  // 1. Get daily picks
+  const picksData = getDailyPicks({ assetTypes: ['STOCK', 'ETF', 'FUTURES'], limit: 5 });
+  const picks = picksData.picks || [];
+
+  // 2. Select target pick
+  let targetPick;
+  if (overrideTicker) {
+    targetPick = picks.find(p => p.ticker === overrideTicker.toUpperCase());
+    if (!targetPick) {
+      return res.status(400).json({ success: false, reason: 'override_ticker_not_in_top5', ticker: overrideTicker });
+    }
+  } else {
+    targetPick = picks.length > 0 ? picks[0] : null;
+  }
+
+  if (!targetPick) {
+    return res.status(400).json({ success: false, reason: 'no_picks_available' });
+  }
+
+  // 3. Guardrails
+  const latestRun = getLatestPipelineRun();
+  const isCrisis = latestRun?.status === 'crisis';
+  const precisionKPI = getPrecisionKPI();
+  const alerts = checkAlerts();
+  const hasCriticalAlert = alerts.some(a => a.level === 'critical');
+  const coveragePct = latestRun?.coverage_pct ?? null;
+
+  const guardReasons = [];
+  if (isCrisis) guardReasons.push('blocked_by_crisis');
+  if (hasCriticalAlert) guardReasons.push('blocked_by_critical_alert');
+  if (precisionKPI && precisionKPI.status === 'critical') guardReasons.push('blocked_by_precision');
+  if (coveragePct !== null && coveragePct < 50) guardReasons.push('blocked_by_low_coverage');
+
+  if (guardReasons.length > 0) {
+    return res.status(422).json({ success: false, reason: 'guardrails_blocked', guardReasons });
+  }
+
+  // 4. Allocation
+  const allocation = computeCompetitionAllocation(targetPick, { budget });
+  if (allocation.blocked) {
+    return res.status(422).json({ success: false, reason: 'allocation_blocked', blockReasons: allocation.blockReasons });
+  }
+
+  // 5. Idempotency: check duplicate open position for same ticker today
+  const today = new Date().toISOString().slice(0, 10);
+  const existingOpen = queryOne(
+    "SELECT id FROM competition_portfolio WHERE ticker = ? AND status = 'open' AND entry_date = ?",
+    [targetPick.ticker, today]
+  );
+  if (existingOpen && !overrideDuplicate) {
+    return res.status(409).json({ success: false, reason: 'duplicate_position_today', ticker: targetPick.ticker, positionId: existingOpen.id });
+  }
+
+  // 6. Execute — save to competition_portfolio
+  const entryPrice = allocation.price;
+  const shares = allocation.shares;
+
+  run(
+    `INSERT INTO competition_portfolio (ticker, shares, entry_price, entry_date, notes)
+     VALUES (?, ?, ?, ?, ?)`,
+    [targetPick.ticker, shares, entryPrice, today,
+     `Auto-buy: score=${targetPick.compositeScore}, edge=${targetPick.edgeScore}, confidence=${targetPick.ml?.confidence}%, budget=${budget}`]
+  );
+  saveDb();
+
+  // Audit log
+  run(`INSERT INTO audit_log (event_type, entity, entity_id, payload)
+       VALUES ('COMPETITION_AUTO_BUY', 'competition_portfolio', ?, ?)`,
+    [targetPick.ticker, JSON.stringify({
+      ticker: targetPick.ticker, shares, entryPrice, budget,
+      compositeScore: targetPick.compositeScore,
+      edgeScore: targetPick.edgeScore,
+      confidence: targetPick.ml?.confidence,
+    })]
+  );
+  saveDb();
+
+  res.json({
+    success: true,
+    ticker: targetPick.ticker,
+    name: targetPick.name,
+    type: targetPick.type,
+    shares,
+    entryPrice,
+    investedAmount: allocation.investedAmount,
+    allocPct: allocation.allocPct,
+    budget,
+    sell: targetPick.sell,
+    ml: targetPick.ml,
+    message: `Kupiono ${shares}x ${targetPick.ticker} @ ${entryPrice} PLN (${allocation.investedAmount} PLN z ${budget} PLN budżetu)`,
+  });
+});
+
+// ============================================================
+// Competition Readiness — quick pass/fail score for "czy gram?"
+// ============================================================
+router.get('/competition/readiness', (req, res) => {
+  const latestRun = getLatestPipelineRun();
+  const precisionKPI = getPrecisionKPI();
+  const alerts = checkAlerts();
+  const picksData = getDailyPicks({ limit: 5 });
+  const picks = picksData.picks || [];
+  const rankedAt = picksData.rankedAt;
+  const dataAgeSec = rankedAt ? Math.round((Date.now() - new Date(rankedAt).getTime()) / 1000) : null;
+
+  const checks = [];
+
+  // Pipeline ran recently
+  const pipelineOk = latestRun && latestRun.status === 'completed';
+  checks.push({ name: 'pipeline', ok: pipelineOk, detail: latestRun?.status || 'no_runs' });
+
+  // Not crisis
+  const noCrisis = latestRun?.status !== 'crisis';
+  checks.push({ name: 'no_crisis', ok: noCrisis, detail: latestRun?.status || 'ok' });
+
+  // Coverage >= 50%
+  const coverageOk = latestRun?.coverage_pct == null || latestRun.coverage_pct >= 50;
+  checks.push({ name: 'coverage', ok: coverageOk, detail: `${latestRun?.coverage_pct ?? '?'}%` });
+
+  // Not degraded
+  const notDegraded = !latestRun?.degraded;
+  checks.push({ name: 'not_degraded', ok: notDegraded, detail: latestRun?.degraded ? 'degraded' : 'ok' });
+
+  // Precision not critical
+  const precisionOk = !precisionKPI || precisionKPI.status !== 'critical';
+  checks.push({ name: 'precision', ok: precisionOk, detail: precisionKPI ? `${precisionKPI.precision1D}% (${precisionKPI.status})` : 'no_data' });
+
+  // No critical alerts
+  const noCritical = !alerts.some(a => a.level === 'critical');
+  checks.push({ name: 'no_critical_alerts', ok: noCritical, detail: `${alerts.length} alerts` });
+
+  // Data freshness < 30 min
+  const freshOk = dataAgeSec != null && dataAgeSec < 1800;
+  checks.push({ name: 'data_fresh', ok: freshOk, detail: dataAgeSec != null ? `${Math.round(dataAgeSec / 60)} min` : 'no_data' });
+
+  // Picks available
+  const hasPicks = picks.length > 0;
+  checks.push({ name: 'has_picks', ok: hasPicks, detail: `${picks.length} picks` });
+
+  const passed = checks.filter(c => c.ok).length;
+  const total = checks.length;
+  const score = Math.round((passed / total) * 100);
+  const ready = checks.every(c => c.ok);
+
+  res.json({
+    ready,
+    score,
+    passed,
+    total,
+    checks,
+    recommendation: ready ? 'GO — wszystkie warunki spełnione' :
+      score >= 75 ? 'CAUTION — większość warunków OK, sprawdź niespełnione' :
+      score >= 50 ? 'RISKY — połowa warunków niespełniona' :
+      'NO GO — zbyt wiele problemów',
+  });
 });
 
 // ============================================================
