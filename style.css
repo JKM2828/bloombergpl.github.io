@@ -420,3 +420,10 @@ h2 > svg, h3 > svg {
 .status-ok { background: var(--green); }
 .status-err { background: var(--red); }
 .status-warn { background: var(--yellow); }
+
+/* ---- Competition Mode ---- */
+#view-competition .big-number { font-size: 2em; }
+#comp-readiness-banner { transition: border-color 0.3s; }
+#comp-best-pick { position: relative; }
+.btn-sm.btn-danger { background: var(--red); color: #fff; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
+.btn-sm.btn-danger:hover { opacity: 0.85; }

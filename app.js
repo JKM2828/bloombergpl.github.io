@@ -26,6 +26,7 @@ document.querySelectorAll('.nav-btn').forEach((btn) => {
       case 'chart': loadChartTickers(); break;
       case 'portfolio': loadPortfolio(); break;
       case 'risk': loadRisk(); break;
+      case 'competition': loadCompetition(); break;
       case 'worker': loadWorker(); break;
       case 'health': loadHealth(); break;
     }
@@ -1288,6 +1289,302 @@ document.getElementById('btn-compute-features').addEventListener('click', async 
 });
 
 // ============================================================
+// COMPETITION MODE
+// ============================================================
+async function loadCompetition() {
+  await Promise.all([
+    loadCompetitionDecision(),
+    loadCompetitionPortfolio(),
+    loadCompetitionSellCandidates(),
+    loadCompetitionHistory(),
+    loadCompetitionReadiness(),
+  ]);
+}
+
+async function loadCompetitionReadiness() {
+  try {
+    const data = await api('/competition/readiness');
+    const banner = document.getElementById('comp-readiness-banner');
+    const scoreEl = document.getElementById('comp-readiness-score');
+    const labelEl = document.getElementById('comp-readiness-label');
+    const checksEl = document.getElementById('comp-readiness-checks');
+
+    scoreEl.textContent = data.score + '%';
+    labelEl.textContent = data.recommendation;
+
+    const borderColor = data.ready ? 'var(--green)' : data.score >= 75 ? 'var(--yellow)' : 'var(--red)';
+    banner.style.borderLeftColor = borderColor;
+    scoreEl.style.color = borderColor;
+
+    checksEl.innerHTML = data.checks.map(c =>
+      `<span style="margin-right:8px;color:${c.ok ? 'var(--green)' : 'var(--red)'}">` +
+      `${c.ok ? '✓' : '✗'} ${c.name} (${c.detail})</span>`
+    ).join('');
+  } catch {
+    document.getElementById('comp-readiness-label').textContent = 'Nie można sprawdzić gotowości';
+  }
+}
+
+async function loadCompetitionDecision() {
+  try {
+    const data = await api('/competition/decision?budget=20000');
+
+    // Best pick
+    const pickEl = document.getElementById('comp-best-pick-content');
+    const bp = data.bestPick;
+    if (bp) {
+      const alloc = bp.allocation || {};
+      pickEl.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div>
+            <div style="font-size:1.4em;font-weight:bold">${bp.ticker} <span style="font-size:0.6em;color:var(--text-muted)">${bp.type}</span></div>
+            <div style="color:var(--text-muted)">${bp.name} · ${bp.sector || '—'}</div>
+            <div style="margin-top:8px">
+              Score: <strong>${fmt(bp.compositeScore)}</strong> | Edge: <strong>${bp.edgeScore}</strong><br>
+              ML: <strong class="positive">${bp.ml ? bp.ml.confidence + '%' : '—'}</strong> |
+              Oczek. zwrot: <strong class="${pnlClass(bp.ml?.expectedReturn)}">${bp.ml ? bp.ml.expectedReturn + '%' : '—'}</strong>
+            </div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:0.9em;color:var(--text-muted)">Alokacja z 20 000 PLN</div>
+            <div style="font-size:1.8em;font-weight:bold;color:var(--green)">${alloc.shares || 0} szt.</div>
+            <div style="font-size:1.1em">${fmt(alloc.investedAmount || 0)} PLN @ ${fmt(alloc.price || 0)} PLN</div>
+            ${bp.alreadyHolding ? '<div style="color:var(--yellow);font-size:0.85em;margin-top:4px">⚠ Już posiadasz pozycję</div>' : ''}
+          </div>
+        </div>
+        ${bp.sell ? `
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:0.85em">
+            SL: <span class="negative">${fmt(bp.sell.stopLoss)}</span> |
+            TP1: <span class="positive">${fmt(bp.sell.takeProfitFast)}</span> (${fmt(bp.sell.takeProfitFastPct)}%) |
+            TP2: <span class="positive">${fmt(bp.sell.takeProfitFull)}</span> (${fmt(bp.sell.takeProfitFullPct)}%) |
+            R:R = ${fmt(bp.sell.riskRewardFast)}x / ${fmt(bp.sell.riskRewardFull)}x
+          </div>
+        ` : ''}
+        ${!data.ready ? `<div style="background:var(--red);color:#fff;padding:6px 10px;border-radius:4px;margin-top:8px;font-size:0.85em">
+          ⛔ BLOKADA: ${data.guardReasons.join(', ')}</div>` : ''}
+      `;
+    } else {
+      pickEl.innerHTML = '<p style="color:var(--text-muted)">Brak dostępnych picków. Uruchom pipeline.</p>';
+    }
+
+    // Auto-buy button state
+    const buyBtn = document.getElementById('btn-comp-auto-buy');
+    const buyStatus = document.getElementById('comp-auto-buy-status');
+    if (data.ready && bp && !bp.alreadyHolding) {
+      buyBtn.disabled = false;
+      buyBtn.style.opacity = '1';
+      buyStatus.innerHTML = `<span style="color:var(--green)">✓ Gotowy — ${bp.ticker} × ${bp.allocation?.shares} szt.</span>`;
+    } else {
+      buyBtn.disabled = true;
+      buyBtn.style.opacity = '0.5';
+      buyStatus.innerHTML = data.ready && bp?.alreadyHolding
+        ? '<span style="color:var(--yellow)">⚠ Pozycja już otwarta dzisiaj</span>'
+        : `<span style="color:var(--red)">⛔ ${data.guardReasons?.join(', ') || 'Brak picków'}</span>`;
+    }
+
+    // Top 5 table
+    const tbody = document.querySelector('#comp-top5-table tbody');
+    if (data.top5 && data.top5.length > 0) {
+      tbody.innerHTML = data.top5.map(p => {
+        const a = p.allocation || {};
+        return `<tr${p.rank === 1 ? ' style="background:rgba(63,185,80,0.08)"' : ''}>
+          <td><strong>${p.rank === 1 ? '★ ' : ''}${p.rank}</strong></td>
+          <td><strong>${p.ticker}</strong></td>
+          <td>${p.name || '—'}</td>
+          <td>${p.type}</td>
+          <td><strong>${fmt(p.compositeScore)}</strong></td>
+          <td>${p.edgeScore || '—'}</td>
+          <td class="positive">${p.ml ? p.ml.confidence + '%' : '—'}</td>
+          <td class="${pnlClass(p.ml?.expectedReturn)}">${p.ml ? p.ml.expectedReturn + '%' : '—'}</td>
+          <td>${fmt(a.price)}</td>
+          <td><strong>${a.shares || 0}</strong></td>
+          <td>${fmt(a.investedAmount || 0)}</td>
+          <td class="negative">${p.sell ? fmt(p.sell.stopLoss) : '—'}</td>
+          <td class="positive">${p.sell ? fmt(p.sell.takeProfitFast) : '—'}</td>
+          <td class="positive">${p.sell ? fmt(p.sell.takeProfitFull) : '—'}</td>
+        </tr>`;
+      }).join('');
+    } else {
+      tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;color:var(--text-muted)">Brak danych. Uruchom pipeline.</td></tr>';
+    }
+
+    // Freshness
+    const freshEl = document.getElementById('comp-freshness');
+    const f = data.freshness || {};
+    const ageMin = f.dataAgeSec ? Math.round(f.dataAgeSec / 60) : null;
+    freshEl.innerHTML = `
+      <p>Ranking z: <strong>${f.rankedAt || '—'}</strong></p>
+      <p>Wiek danych: <strong style="color:${f.stale ? 'var(--red)' : 'var(--green)'}">${ageMin != null ? ageMin + ' min' : '—'}</strong></p>
+      <p>Reżim: <strong>${data.regime || '—'}</strong></p>
+    `;
+
+    // Quality
+    const qualEl = document.getElementById('comp-quality');
+    const q = data.quality || {};
+    const kpi = q.precisionKPI;
+    qualEl.innerHTML = `
+      <p>Pokrycie: <strong style="color:${(q.coveragePct || 0) >= 80 ? 'var(--green)' : 'var(--yellow)'}">${q.coveragePct != null ? q.coveragePct + '%' : '—'}</strong></p>
+      <p>Degraded: <strong style="color:${q.degraded ? 'var(--red)' : 'var(--green)'}">${q.degraded ? 'TAK' : 'NIE'}</strong></p>
+      <p>Precision@1D: <strong>${kpi ? kpi.precision1D + '%' : '—'}</strong></p>
+      <p>Precision@3D: <strong>${kpi ? kpi.precision3D + '%' : '—'}</strong></p>
+      <p>Crisis: <strong style="color:${q.crisis ? 'var(--red)' : 'var(--green)'}">${q.crisis ? '🚨 TAK' : 'NIE'}</strong></p>
+    `;
+
+    // Alerts
+    const alertEl = document.getElementById('comp-alerts');
+    if (q.alertCount > 0) {
+      alertEl.innerHTML = (q.criticalAlerts || []).map(a =>
+        `<p style="color:var(--red)">🚨 ${a.message}</p>`
+      ).concat((q.warnings || []).map(a =>
+        `<p style="color:var(--yellow)">⚠ ${a.message}</p>`
+      )).join('');
+    } else {
+      alertEl.innerHTML = '<p style="color:var(--green)">✓ Brak alertów</p>';
+    }
+
+  } catch (err) {
+    document.getElementById('comp-best-pick-content').innerHTML =
+      `<p style="color:var(--red)">Błąd: ${err.message}</p>`;
+  }
+}
+
+async function loadCompetitionPortfolio() {
+  try {
+    const data = await api('/competition/portfolio');
+    document.getElementById('comp-portfolio-value').innerHTML =
+      `<strong>${fmt(data.totalMarketValue)} PLN</strong>`;
+    document.getElementById('comp-portfolio-pnl').innerHTML =
+      `<strong class="${pnlClass(data.totalPnl)}">${fmt(data.totalPnl)} PLN</strong>`;
+    document.getElementById('comp-portfolio-count').textContent = data.count;
+
+    const tbody = document.querySelector('#comp-portfolio-table tbody');
+    if (data.positions.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Brak otwartych pozycji</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.positions.map(p => `
+      <tr>
+        <td><strong>${p.ticker}</strong></td>
+        <td>${p.shares}</td>
+        <td>${fmt(p.entry_price)}</td>
+        <td>${fmt(p.currentPrice)}</td>
+        <td>${fmt(p.marketValue)}</td>
+        <td class="${pnlClass(p.pnlPct)}"><strong>${fmt(p.pnlPct)}%</strong></td>
+        <td>${p.entry_date || '—'}</td>
+        <td><button class="btn-sm btn-danger" onclick="compSellPosition(${p.id}, '${p.ticker}', ${p.currentPrice})">Sprzedaj</button></td>
+      </tr>
+    `).join('');
+  } catch {
+    document.querySelector('#comp-portfolio-table tbody').innerHTML =
+      '<tr><td colspan="8" style="color:var(--red)">Błąd ładowania portfela</td></tr>';
+  }
+}
+
+async function loadCompetitionSellCandidates() {
+  try {
+    const data = await api('/competition/sell-candidates');
+    const tbody = document.querySelector('#comp-sell-table tbody');
+    if (data.candidates.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Brak kandydatów do sprzedaży</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.candidates.map(c => {
+      const actionCls = c.action === 'SELL' ? 'badge-sell' : c.action === 'PARTIAL_SELL' ? 'badge-hold' : 'badge-hold';
+      const actionLabel = c.action === 'SELL' ? 'SPRZEDAJ' : c.action === 'PARTIAL_SELL' ? 'CZĘŚCIOWO' : 'ROZWAŻ';
+      return `<tr>
+        <td><strong>${c.ticker}</strong></td>
+        <td>${c.shares}</td>
+        <td>${fmt(c.entryPrice)}</td>
+        <td>${fmt(c.currentPrice)}</td>
+        <td class="${pnlClass(c.pnlPct)}"><strong>${fmt(c.pnlPct)}%</strong></td>
+        <td>${c.daysHeld}d</td>
+        <td><span class="badge ${actionCls}">${actionLabel}</span></td>
+        <td style="font-size:0.8em">${c.sellReasons.join('; ')}</td>
+      </tr>`;
+    }).join('');
+  } catch {
+    document.querySelector('#comp-sell-table tbody').innerHTML =
+      '<tr><td colspan="8" style="color:var(--red)">Błąd</td></tr>';
+  }
+}
+
+async function loadCompetitionHistory() {
+  try {
+    const data = await api('/competition/history');
+    const statsEl = document.getElementById('comp-history-stats');
+    statsEl.innerHTML = `
+      Transakcji: <strong>${data.totalTrades}</strong> |
+      Wygrane: <strong class="positive">${data.wins}</strong> |
+      Przegrane: <strong class="negative">${data.losses}</strong> |
+      Win rate: <strong>${data.winRate != null ? data.winRate + '%' : '—'}</strong>
+    `;
+
+    const tbody = document.querySelector('#comp-history-table tbody');
+    const closed = (data.trades || []).filter(t => t.status === 'closed');
+    if (closed.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Brak zamkniętych transakcji</td></tr>';
+      return;
+    }
+    tbody.innerHTML = closed.map(t => {
+      const pnlPct = t.entry_price > 0 ? ((t.exit_price - t.entry_price) / t.entry_price * 100) : 0;
+      return `<tr>
+        <td><strong>${t.ticker}</strong></td>
+        <td>${t.shares}</td>
+        <td>${fmt(t.entry_price)}</td>
+        <td>${fmt(t.exit_price)}</td>
+        <td class="${pnlClass(pnlPct)}"><strong>${fmt(pnlPct)}%</strong></td>
+        <td>${t.entry_date || '—'}</td>
+        <td>${t.exit_date || '—'}</td>
+      </tr>`;
+    }).join('');
+  } catch {
+    document.querySelector('#comp-history-table tbody').innerHTML =
+      '<tr><td colspan="7" style="color:var(--red)">Błąd</td></tr>';
+  }
+}
+
+// Competition sell position
+async function compSellPosition(positionId, ticker, exitPrice) {
+  if (!confirm(`Sprzedać ${ticker} @ ${exitPrice} PLN?`)) return;
+  try {
+    const data = await api('/competition/sell', {
+      method: 'POST',
+      body: JSON.stringify({ positionId, exit_price: exitPrice }),
+    });
+    document.getElementById('comp-buy-result').innerHTML =
+      `<span style="color:var(--green)">${data.message}</span>`;
+    loadCompetitionPortfolio();
+    loadCompetitionSellCandidates();
+    loadCompetitionHistory();
+  } catch (err) {
+    document.getElementById('comp-buy-result').innerHTML =
+      `<span style="color:var(--red)">Błąd: ${err.message}</span>`;
+  }
+}
+window.compSellPosition = compSellPosition;
+
+// Auto-buy click handler
+document.getElementById('btn-comp-auto-buy').addEventListener('click', async () => {
+  const resultEl = document.getElementById('comp-buy-result');
+  const btn = document.getElementById('btn-comp-auto-buy');
+  btn.disabled = true;
+  resultEl.innerHTML = '<span style="color:var(--yellow)">Kupuję...</span>';
+  try {
+    const data = await api('/competition/auto-buy', {
+      method: 'POST',
+      body: JSON.stringify({ budget: 20000 }),
+    });
+    resultEl.innerHTML = `<span style="color:var(--green)">✓ ${data.message}</span>`;
+    // Refresh all competition data
+    loadCompetition();
+  } catch (err) {
+    const errData = err.message || 'Nieznany błąd';
+    resultEl.innerHTML = `<span style="color:var(--red)">⛔ ${errData}</span>`;
+    btn.disabled = false;
+  }
+});
+
+// ============================================================
 // AUTO-REFRESH (every 60s for dashboard, every 5min for chart)
 // ============================================================
 setInterval(() => {
@@ -1301,6 +1598,8 @@ setInterval(() => {
     loadInstrumentsTable();
   } else if (activeView?.id === 'view-today') {
     loadToday();
+  } else if (activeView?.id === 'view-competition') {
+    loadCompetition();
   }
 }, 60000);
 

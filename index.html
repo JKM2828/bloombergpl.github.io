@@ -29,6 +29,7 @@
       <button class="nav-btn" data-view="chart"><i data-lucide="candlestick-chart"></i> Wykres</button>
       <button class="nav-btn" data-view="portfolio"><i data-lucide="wallet"></i> Portfel</button>
       <button class="nav-btn" data-view="risk"><i data-lucide="shield-alert"></i> Ryzyko</button>
+      <button class="nav-btn" data-view="competition"><i data-lucide="trophy"></i> Konkurs</button>
       <button class="nav-btn" data-view="worker"><i data-lucide="refresh-cw"></i> Worker</button>
       <button class="nav-btn" data-view="health"><i data-lucide="activity"></i> Status</button>
     </nav>
@@ -296,6 +297,111 @@
       <div class="card mt">
         <h3>Limity ryzyka</h3>
         <div id="risk-limits"></div>
+      </div>
+    </section>
+
+    <!-- ============ COMPETITION MODE VIEW ============ -->
+    <section id="view-competition" class="view">
+      <h2><i data-lucide="trophy" class="icon-inline"></i> Tryb Konkursowy – Budżet 20 000 PLN</h2>
+      <div class="disclaimer-box">
+        Tryb konkursowy: automatyczna analiza i alokacja budżetu. Nie stanowi porady inwestycyjnej.
+      </div>
+
+      <!-- READINESS BANNER -->
+      <div id="comp-readiness-banner" class="card" style="margin-bottom:16px;border-left:4px solid var(--text-muted)">
+        <div style="display:flex;align-items:center;gap:12px">
+          <div id="comp-readiness-score" class="big-number">—</div>
+          <div>
+            <div id="comp-readiness-label" style="font-weight:bold;font-size:1.1em">Sprawdzam gotowość...</div>
+            <div id="comp-readiness-checks" style="font-size:0.85em;color:var(--text-muted)"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TOP PICK + AUTO-BUY -->
+      <div class="grid-3" style="margin-bottom:16px">
+        <div class="card ai-card" style="grid-column:span 2;border:2px solid var(--green)" id="comp-best-pick">
+          <h3><i data-lucide="star" class="icon-inline"></i> Najlepsza spółka #1</h3>
+          <div id="comp-best-pick-content">Ładowanie...</div>
+        </div>
+        <div class="card" style="display:flex;flex-direction:column;gap:8px">
+          <h3><i data-lucide="zap" class="icon-inline"></i> Auto-zakup</h3>
+          <div id="comp-auto-buy-status" style="font-size:0.85em;color:var(--text-muted)">Gotowy do akcji</div>
+          <button id="btn-comp-auto-buy" class="btn-primary" style="margin-top:auto;padding:12px">
+            <i data-lucide="shopping-cart" class="icon-inline"></i> Kup najlepszą spółkę
+          </button>
+          <div id="comp-buy-result" style="font-size:0.85em;margin-top:4px"></div>
+        </div>
+      </div>
+
+      <!-- TOP 5 RANKING -->
+      <div class="card" style="margin-bottom:16px">
+        <h3><i data-lucide="list-ordered" class="icon-inline"></i> Top 5 – Ranking konkursowy</h3>
+        <table id="comp-top5-table">
+          <thead>
+            <tr>
+              <th>#</th><th>Ticker</th><th>Nazwa</th><th>Typ</th><th>Score</th><th>Edge</th>
+              <th>ML %</th><th>Oczek. zwrot</th><th>Cena</th><th>Szt.</th><th>Kwota</th>
+              <th>SL</th><th>TP1</th><th>TP2</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- TRUST & FRESHNESS PANEL -->
+      <div class="grid-3" style="margin-bottom:16px">
+        <div class="card">
+          <h3><i data-lucide="clock" class="icon-inline"></i> Świeżość danych</h3>
+          <div id="comp-freshness">Ładowanie...</div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="shield-check" class="icon-inline"></i> Jakość modelu</h3>
+          <div id="comp-quality">Ładowanie...</div>
+        </div>
+        <div class="card">
+          <h3><i data-lucide="bell" class="icon-inline"></i> Alerty</h3>
+          <div id="comp-alerts">Ładowanie...</div>
+        </div>
+      </div>
+
+      <!-- COMPETITION PORTFOLIO -->
+      <div class="card" style="margin-bottom:16px">
+        <h3><i data-lucide="briefcase" class="icon-inline"></i> Portfel konkursowy</h3>
+        <div class="grid-3" style="margin-bottom:12px">
+          <div><strong>Wartość:</strong> <span id="comp-portfolio-value">—</span></div>
+          <div><strong>P&L:</strong> <span id="comp-portfolio-pnl">—</span></div>
+          <div><strong>Pozycje:</strong> <span id="comp-portfolio-count">—</span></div>
+        </div>
+        <table id="comp-portfolio-table">
+          <thead>
+            <tr><th>Ticker</th><th>Szt.</th><th>Cena wejścia</th><th>Akt. cena</th><th>Wartość</th><th>P&L %</th><th>Data</th><th>Akcja</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- SELL CANDIDATES -->
+      <div class="card" style="margin-bottom:16px">
+        <h3><i data-lucide="trending-down" class="icon-inline"></i> Kandydaci do sprzedaży</h3>
+        <table id="comp-sell-table">
+          <thead>
+            <tr><th>Ticker</th><th>Szt.</th><th>Wejście</th><th>Akt. cena</th><th>P&L %</th><th>Dni</th><th>Akcja</th><th>Powody</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- HISTORY -->
+      <div class="card">
+        <h3><i data-lucide="history" class="icon-inline"></i> Historia konkursowa</h3>
+        <div id="comp-history-stats" style="margin-bottom:8px"></div>
+        <table id="comp-history-table">
+          <thead>
+            <tr><th>Ticker</th><th>Szt.</th><th>Wejście</th><th>Wyjście</th><th>P&L %</th><th>Data wejścia</th><th>Data wyjścia</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
 
