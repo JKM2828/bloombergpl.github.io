@@ -340,7 +340,10 @@ async function fetchBatch(tickers, maxRequests = 20) {
       }
       console.log(`[stooq-json]   chunk ${idx + 1}/${chunks.length}: ${chunkResult.size}/${chunks[idx].length} ok`);
     } catch (err) {
-      if (err.code === 'STOOQ_RATE_LIMIT') throw err;
+      if (err.code === 'STOOQ_RATE_LIMIT') {
+        console.warn(`[stooq-json] Rate limit hit at chunk ${idx + 1}/${chunks.length} — returning ${result.size} partial results`);
+        return { data: result, httpCalls: cycleRequestCount, retryRecovered: 0, rateLimited: true };
+      }
       console.warn(`[stooq-json]   chunk ${idx + 1} error: ${err.message}`);
     }
 
@@ -377,7 +380,10 @@ async function fetchBatch(tickers, maxRequests = 20) {
         }
         console.log(`[stooq-json]   retry ${idx + 1}/${retryLimit}: ${retryResult.size}/${retryChunks[idx].length} recovered`);
       } catch (err) {
-        if (err.code === 'STOOQ_RATE_LIMIT') throw err;
+        if (err.code === 'STOOQ_RATE_LIMIT') {
+          console.warn(`[stooq-json] Rate limit hit at retry ${idx + 1}/${retryLimit} — returning ${result.size} partial results`);
+          return { data: result, httpCalls: cycleRequestCount, retryRecovered };
+        }
         console.warn(`[stooq-json]   retry ${idx + 1} error: ${err.message}`);
       }
     }

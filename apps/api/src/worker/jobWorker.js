@@ -272,17 +272,26 @@ const processors = {
     const cycleStats = getLastCycleStats();
     const coveragePct = cycleStats?.liveCoveragePct;
     const degraded = coveragePct != null && coveragePct < 80;
-    const crisis = coveragePct != null && coveragePct < 60;
 
-    // ---- CRISIS GUARD: halt analysis if coverage dangerously low ----
+    // ---- CRISIS GUARD: halt ONLY if we literally have no features/candles ----
+    // Low ingest coverage alone is NOT a crisis — we may have valid historical data.
+    // Crisis = truly blind: no features computed, no candles at all.
+    const crisis = (() => {
+      if (coveragePct == null || coveragePct >= 60) return false;
+      const featureCount = queryOne('SELECT COUNT(*) as n FROM features');
+      const candleCount = queryOne('SELECT COUNT(*) as n FROM candles');
+      return (featureCount?.n || 0) === 0 || (candleCount?.n || 0) === 0;
+    })();
+
+    // ---- CRISIS GUARD: halt ONLY if we literally have no features/candles ----
     if (crisis) {
-      console.error(`[worker] 🚨 CRISIS: ingest coverage ${coveragePct}% < 60% — halting analysis, using last-known-good picks`);
+      console.error(`[worker] 🚨 CRISIS: ingest coverage ${coveragePct}% AND no historical data — halting analysis`);
       updatePipelineRun(runId, {
         finished_at: new Date().toISOString(),
         status: 'crisis',
         coverage_pct: coveragePct,
         degraded: 1,
-        summary: JSON.stringify({ crisis: true, coveragePct, reason: 'Coverage below 60% crisis threshold' }),
+        summary: JSON.stringify({ crisis: true, coveragePct, reason: 'No historical data available' }),
       });
       stats.lastAnalysisCycle = new Date().toISOString();
       stats.analysisRuns++;
@@ -652,9 +661,14 @@ function checkAlerts() {
     alerts.push({ level: 'warning', type: 'low_coverage', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < ${ALERT_THRESHOLDS.minIngestCoveragePct}%` });
   }
 
-  // Crisis coverage check
+  // Crisis coverage check — only fire when there is literally no data in DB
   if (lastCycle && lastCycle.liveCoveragePct < 60) {
-    alerts.push({ level: 'critical', type: 'crisis_coverage', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < 60% — analysis halted (crisis mode)` });
+    const featureCount = queryOne('SELECT COUNT(*) as n FROM features');
+    if ((featureCount?.n || 0) === 0) {
+      alerts.push({ level: 'critical', type: 'crisis_coverage', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < 60% and no historical features — analysis halted` });
+    } else {
+      alerts.push({ level: 'warning', type: 'low_ingest', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < 60% — running on historical data` });
+    }
   }
 
   // Precision KPI check
