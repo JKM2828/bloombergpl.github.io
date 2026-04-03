@@ -36,10 +36,24 @@ document.querySelectorAll('.nav-btn').forEach((btn) => {
 // ============================================================
 // API Helpers
 // ============================================================
+
+/** Escape HTML to prevent XSS when inserting dynamic strings into innerHTML */
+function esc(str) {
+  if (str == null) return '';
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(String(str)));
+  return d.innerHTML;
+}
+
+const API_TIMEOUT_MS = 30000;
+
 async function api(path, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
   try {
     const res = await fetch(API + path, {
       headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
       ...options,
     });
     if (!res.ok) {
@@ -48,8 +62,11 @@ async function api(path, options = {}) {
     }
     return res.json();
   } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Request timeout');
     console.error(`API ${path}:`, err);
     throw err;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -100,7 +117,7 @@ async function loadToday() {
     }).join('');
   } catch (err) {
     document.querySelector('#today-table tbody').innerHTML =
-      `<tr><td colspan="9" style="color:var(--red)">${err.message}</td></tr>`;
+      `<tr><td colspan="9" style="color:var(--red)">${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -444,7 +461,7 @@ async function loadPredictions() {
     `).join('');
   } catch (err) {
     document.querySelector('#predictions-table tbody').innerHTML =
-      `<tr><td colspan="16" class="negative">Błąd: ${err.message}</td></tr>`;  }
+      `<tr><td colspan="16" class="negative">Błąd: ${esc(err.message)}</td></tr>`;  }
 }
 
 function showPrediction(ticker) {
@@ -464,7 +481,7 @@ document.getElementById('btn-run-pipeline').addEventListener('click', async () =
     el.innerHTML = `<span style="color:var(--green)">Pipeline gotowy! ${data.jobsProcessed} zadań przetworzonych.</span>`;
     loadPredictions();
   } catch (err) {
-    el.innerHTML = `<span style="color:var(--red)">Błąd: ${err.message}</span>`;
+    el.innerHTML = `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
   }
 });
 
@@ -476,7 +493,7 @@ document.getElementById('btn-run-predictions').addEventListener('click', async (
     el.innerHTML = `<span style="color:var(--green)">${data.predictionsCount} predykcji, ${data.signalsCount} sygnałów.</span>`;
     loadPredictions();
   } catch (err) {
-    el.innerHTML = `<span style="color:var(--red)">${err.message}</span>`;
+    el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
 });
 
@@ -487,7 +504,7 @@ document.getElementById('btn-train-models').addEventListener('click', async () =
     const data = await api('/ml/train', { method: 'POST' });
     el.innerHTML = `<span style="color:var(--green)">Wytrenowano ${data.models} modeli.</span>`;
   } catch (err) {
-    el.innerHTML = `<span style="color:var(--red)">${err.message}</span>`;
+    el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
 });
 
@@ -524,7 +541,7 @@ async function loadSignals() {
     `).join('');
   } catch (err) {
     document.querySelector('#signals-table tbody').innerHTML =
-      `<tr><td colspan="13" class="negative">Błąd: ${err.message}</td></tr>`;
+      `<tr><td colspan="13" class="negative">Błąd: ${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -564,7 +581,7 @@ async function loadScreener() {
     }).join('');
   } catch (err) {
     document.querySelector('#ranking-table tbody').innerHTML =
-      `<tr><td colspan="12">Błąd: ${err.message}</td></tr>`;
+      `<tr><td colspan="12">Błąd: ${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -592,7 +609,10 @@ let volumeSeries = null;
 // ---- WebSocket Live Feed ----
 let wsChart = null;
 let wsReconnectTimer = null;
-const WS_RECONNECT_DELAY_MS = 5000;
+let wsReconnectAttempts = 0;
+const WS_RECONNECT_BASE_MS = 2000;
+const WS_RECONNECT_MAX_MS = 30000;
+const WS_MAX_RECONNECT_ATTEMPTS = 10;
 
 function getWsUrl() {
   if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
@@ -629,6 +649,7 @@ function connectChartWS(ticker, tf) {
 
   wsChart.onopen = () => {
     updateLiveStatus('connected');
+    wsReconnectAttempts = 0; // reset on success
     if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   };
 
@@ -669,6 +690,15 @@ function disconnectChartWS() {
 
 function scheduleReconnect(ticker, tf) {
   if (wsReconnectTimer) return;
+  if (wsReconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
+    console.warn('[ws] Max reconnect attempts reached, giving up');
+    updateLiveStatus('disconnected');
+    return;
+  }
+  // Exponential backoff with jitter
+  const delay = Math.min(WS_RECONNECT_BASE_MS * Math.pow(1.5, wsReconnectAttempts), WS_RECONNECT_MAX_MS)
+    + Math.random() * 1000;
+  wsReconnectAttempts++;
   wsReconnectTimer = setTimeout(() => {
     wsReconnectTimer = null;
     // Only reconnect if still on chart view and same ticker
@@ -678,14 +708,14 @@ function scheduleReconnect(ticker, tf) {
     if (activeView?.id === 'view-chart' && currentTicker === ticker && currentTf === tf) {
       connectChartWS(ticker, tf);
     }
-  }, WS_RECONNECT_DELAY_MS);
+  }, delay);
 }
 
 async function loadChartTickers() {
   try {
     const data = await api('/instruments');
     const select = document.getElementById('chart-ticker');
-    select.innerHTML = data.map((i) => `<option value="${i.ticker}">${i.ticker} – ${i.name}</option>`).join('');
+    select.innerHTML = data.map((i) => `<option value="${esc(i.ticker)}">${esc(i.ticker)} – ${esc(i.name)}</option>`).join('');
 
     const tradeSelect = document.getElementById('trade-ticker');
     if (tradeSelect) {
@@ -1037,7 +1067,7 @@ async function loadWorker() {
       `).join('');
     }
   } catch (err) {
-    document.getElementById('worker-info').innerHTML = `<p class="negative">Błąd: ${err.message}</p>`;
+    document.getElementById('worker-info').innerHTML = `<p class="negative">Błąd: ${esc(err.message)}</p>`;
   }
 }
 
@@ -1048,7 +1078,7 @@ document.getElementById('btn-enqueue-pipeline').addEventListener('click', async 
     await api('/pipeline/run', { method: 'POST' });
     el.innerHTML = '<span style="color:var(--green)">Pipeline uruchomiony!</span>';
     loadWorker();
-  } catch (err) { el.innerHTML = `<span class="negative">${err.message}</span>`; }
+  } catch (err) { el.innerHTML = `<span class="negative">${esc(err.message)}</span>`; }
 });
 
 document.getElementById('btn-enqueue-ingest').addEventListener('click', async () => {
@@ -1070,7 +1100,7 @@ document.getElementById('btn-drain-queue').addEventListener('click', async () =>
     const data = await api('/worker/drain', { method: 'POST' });
     el.innerHTML = `<span style="color:var(--green)">${data.message}</span>`;
     loadWorker();
-  } catch (err) { el.innerHTML = `<span class="negative">${err.message}</span>`; }
+  } catch (err) { el.innerHTML = `<span class="negative">${esc(err.message)}</span>`; }
 });
 
 // ============================================================
@@ -1261,7 +1291,7 @@ document.getElementById('btn-ingest-full').addEventListener('click', async () =>
     el.innerHTML = `<span style="color:var(--green)">Gotowe! ${data.total} nowych świec, ${data.errors} błędów.</span>`;
     loadHealth();
   } catch (err) {
-    el.innerHTML = `<span style="color:var(--red)">Błąd: ${err.message}</span>`;
+    el.innerHTML = `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
   }
 });
 
@@ -1273,7 +1303,7 @@ document.getElementById('btn-ingest-incr').addEventListener('click', async () =>
     el.innerHTML = `<span style="color:var(--green)">Gotowe! ${data.total} nowych świec, ${data.errors} błędów.</span>`;
     loadHealth();
   } catch (err) {
-    el.innerHTML = `<span style="color:var(--red)">Błąd: ${err.message}</span>`;
+    el.innerHTML = `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
   }
 });
 
@@ -1284,7 +1314,7 @@ document.getElementById('btn-compute-features').addEventListener('click', async 
     const data = await api('/ml/features', { method: 'POST' });
     el.innerHTML = `<span style="color:var(--green)">Obliczono cechy dla ${data.count} instrumentów.</span>`;
   } catch (err) {
-    el.innerHTML = `<span style="color:var(--red)">${err.message}</span>`;
+    el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
 });
 
@@ -1444,7 +1474,7 @@ async function loadCompetitionDecision() {
 
   } catch (err) {
     document.getElementById('comp-best-pick-content').innerHTML =
-      `<p style="color:var(--red)">Błąd: ${err.message}</p>`;
+      `<p style="color:var(--red)">Błąd: ${esc(err.message)}</p>`;
   }
 }
 
@@ -1558,7 +1588,7 @@ async function compSellPosition(positionId, ticker, exitPrice) {
     loadCompetitionHistory();
   } catch (err) {
     document.getElementById('comp-buy-result').innerHTML =
-      `<span style="color:var(--red)">Błąd: ${err.message}</span>`;
+      `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
   }
 }
 window.compSellPosition = compSellPosition;
