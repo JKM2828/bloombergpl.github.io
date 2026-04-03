@@ -169,7 +169,7 @@ function backtestAll(opts = {}) {
 // Normalize features for backtest (mirrors mlEngine.normalizeInputs)
 function normalizeBacktest(f) {
   if (f.rsi14 == null) return null;
-  return {
+  const result = {
     rsi14: (f.rsi14 || 50) / 100,
     rsi7: (f.rsi7 || 50) / 100,
     macd_norm: Math.tanh((f.macd || 0) / 10),
@@ -190,6 +190,11 @@ function normalizeBacktest(f) {
     mom10d: Math.tanh((f.momentum_10d || 0) * 5),
     rel_strength: Math.tanh((f.relative_strength || 0) * 5),
   };
+  // NaN/Infinity guard — replace with 0 (mirrors mlEngine.normalizeInputs)
+  for (const key of Object.keys(result)) {
+    if (!Number.isFinite(result[key])) result[key] = 0;
+  }
+  return result;
 }
 
 module.exports = { walkForwardBacktest, backtestAll };

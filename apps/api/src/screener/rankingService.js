@@ -913,7 +913,10 @@ function getLatestRanking(limit = 20) {
 // HELPERS
 // ============================================================
 function normalize(val, min, max) {
-  return Math.max(0, Math.min(1, (val - min) / (max - min)));
+  if (!Number.isFinite(val)) return 0;
+  const range = max - min;
+  if (range === 0) return 0.5;
+  return Math.max(0, Math.min(1, (val - min) / range));
 }
 
 function clamp(v) {

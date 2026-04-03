@@ -169,6 +169,20 @@ function broadcast(ticker, tf, candle) {
  * Poll GPW API for all actively subscribed tickers and broadcast updates.
  */
 async function pollAndBroadcast() {
+  // Cleanup: remove subscription keys with no clients
+  for (const [subKey, subs] of subscriptions) {
+    if (subs.size === 0) subscriptions.delete(subKey);
+  }
+
+  // Cleanup: evict expired candle cache entries
+  const now = Date.now();
+  for (const [ticker, time] of lastCandleTime) {
+    if (now - time > CANDLE_CACHE_TTL_MS) {
+      lastCandle.delete(ticker);
+      lastCandleTime.delete(ticker);
+    }
+  }
+
   // Collect unique tickers from active subscriptions
   const tickerSet = new Set();
   for (const subKey of subscriptions.keys()) {

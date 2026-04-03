@@ -39,14 +39,21 @@ function trackCall(n = 1) { resetGlobalCounter(); globalDailyCount += n; }
 function globalBudgetRemaining() { resetGlobalCounter(); return Math.max(0, GLOBAL_DAILY_LIMIT - globalDailyCount); }
 
 // ============================================================
-// CIRCUIT BREAKER — per-provider failure tracking
-// After 5 consecutive failures, skip that provider for 10 min.
+// CIRCUIT BREAKER — per-provider AND per-ticker failure tracking
+// Provider-level: After 5 consecutive failures, skip that provider for 10 min.
+// Ticker-level:  After 3 consecutive failures on the SAME ticker across all
+//   providers, skip that specific ticker for 30 min to avoid cascade.
 // ============================================================
 const circuitState = {};
 const CB_THRESHOLD = 5;
 const CB_COOLDOWN_MS = 10 * 60 * 1000;
 
-function cbRecord(providerName, success) {
+// Per-ticker circuit breaker state
+const tickerCircuitState = {};
+const TICKER_CB_THRESHOLD = 3;
+const TICKER_CB_COOLDOWN_MS = 30 * 60 * 1000;
+
+function cbRecord(providerName, success, ticker) {
   if (!circuitState[providerName]) circuitState[providerName] = { failures: 0, openUntil: 0 };
   const s = circuitState[providerName];
   if (success) { s.failures = 0; }
@@ -57,12 +64,32 @@ function cbRecord(providerName, success) {
       console.warn(`[circuit-breaker] ${providerName} tripped — cooldown ${CB_COOLDOWN_MS / 1000}s`);
     }
   }
+  // Per-ticker tracking
+  if (ticker) {
+    if (!tickerCircuitState[ticker]) tickerCircuitState[ticker] = { failures: 0, openUntil: 0 };
+    const t = tickerCircuitState[ticker];
+    if (success) { t.failures = 0; }
+    else {
+      t.failures++;
+      if (t.failures >= TICKER_CB_THRESHOLD) {
+        t.openUntil = Date.now() + TICKER_CB_COOLDOWN_MS;
+        console.warn(`[circuit-breaker] ticker ${ticker} tripped — cooldown ${TICKER_CB_COOLDOWN_MS / 1000}s`);
+      }
+    }
+  }
 }
 function cbIsOpen(providerName) {
   const s = circuitState[providerName];
   if (!s) return false;
   if (s.openUntil > Date.now()) return true;
   if (s.openUntil > 0 && Date.now() >= s.openUntil) { s.failures = 0; s.openUntil = 0; }
+  return false;
+}
+function tickerCbIsOpen(ticker) {
+  const t = tickerCircuitState[ticker];
+  if (!t) return false;
+  if (t.openUntil > Date.now()) return true;
+  if (t.openUntil > 0 && Date.now() >= t.openUntil) { t.failures = 0; t.openUntil = 0; }
   return false;
 }
 
@@ -99,13 +126,14 @@ async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
 // BUDGET EXHAUSTION ALERTS
 // Fires once per threshold crossing to avoid log spam.
 // ============================================================
-const budgetAlertState = { sentAt10Pct: false, sentAt0: false, lastResetDate: null };
+const budgetAlertState = { sentAt10Pct: false, sentAt0: false, lastResetDate: null, degraded: false };
 
 function checkBudgetAlerts() {
   const today = new Date().toISOString().slice(0, 10);
   if (budgetAlertState.lastResetDate !== today) {
     budgetAlertState.sentAt10Pct = false;
     budgetAlertState.sentAt0 = false;
+    budgetAlertState.degraded = false;
     budgetAlertState.lastResetDate = today;
   }
   const remaining = globalBudgetRemaining();
@@ -117,7 +145,15 @@ function checkBudgetAlerts() {
   if (!budgetAlertState.sentAt0 && remaining <= 0) {
     console.warn(`[budget-alert] 🔴 HTTP budget EXHAUSTED (${GLOBAL_DAILY_LIMIT} calls used) — all providers suspended until midnight`);
     budgetAlertState.sentAt0 = true;
+    budgetAlertState.degraded = true;
   }
+}
+
+/**
+ * Returns true if the system is in degraded mode (budget exhausted).
+ */
+function isDegraded() {
+  return budgetAlertState.degraded;
 }
 
 /**
@@ -136,6 +172,12 @@ function getBudgetStats() {
     circuitBreakers: Object.fromEntries(
       Object.entries(circuitState).map(([k, v]) => [k, { failures: v.failures, open: v.openUntil > Date.now() }])
     ),
+    tickerCircuitBreakers: Object.fromEntries(
+      Object.entries(tickerCircuitState)
+        .filter(([, v]) => v.failures > 0 || v.openUntil > Date.now())
+        .map(([k, v]) => [k, { failures: v.failures, open: v.openUntil > Date.now() }])
+    ),
+    degraded: budgetAlertState.degraded,
   };
 }
 
@@ -169,6 +211,11 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
   const isYahooCapable = !YAHOO_UNSUPPORTED_TICKERS.has(ticker);
   const isEodhdCapable = isEodhdAllowed(ticker);
 
+  // Per-ticker circuit breaker check
+  if (tickerCbIsOpen(ticker)) {
+    return { provider: 'multi', candles: [], tickerCircuitOpen: true };
+  }
+
   // Global budget check + alert
   checkBudgetAlerts();
   if (globalBudgetRemaining() <= 0) {
@@ -181,14 +228,14 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
     try {
       const candles = await withRetry(() => gpwProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
-      cbRecord('gpw', true);
+      cbRecord('gpw', true, ticker);
       if (candles && candles.length > 0) {
         return { provider: 'gpw', candles };
       }
     } catch (err) {
       if (err.code !== 'GPW_NO_KEY' && err.code !== 'GPW_BUDGET_EXHAUSTED') {
         trackCall();
-        cbRecord('gpw', false);
+        cbRecord('gpw', false, ticker);
         errors.push(`gpw: ${err.message}`);
       }
     }
@@ -199,13 +246,13 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
     try {
       const candles = await withRetry(() => stooqJsonProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
-      cbRecord('stooq-json', true);
+      cbRecord('stooq-json', true, ticker);
       if (candles && candles.length > 0) {
         return { provider: 'stooq-json', candles };
       }
     } catch (err) {
       trackCall();
-      cbRecord('stooq-json', false);
+      cbRecord('stooq-json', false, ticker);
       errors.push(`stooq-json: ${err.message}`);
     }
   }
@@ -215,13 +262,13 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
     try {
       const candles = await withRetry(() => stooqProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
-      cbRecord('stooq-csv', true);
+      cbRecord('stooq-csv', true, ticker);
       if (candles && candles.length > 0) {
         return { provider: 'stooq', candles };
       }
     } catch (err) {
       trackCall();
-      cbRecord('stooq-csv', false);
+      cbRecord('stooq-csv', false, ticker);
       if (err && err.code === 'STOOQ_RATE_LIMIT') {
         errors.push(`stooq-csv: rate-limited until ${err.cooldownUntil}`);
       } else {
@@ -235,14 +282,14 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
     try {
       const candles = await withRetry(() => eodhdProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
-      cbRecord('eodhd', true);
+      cbRecord('eodhd', true, ticker);
       if (candles && candles.length > 0) {
         return { provider: 'eodhd', candles };
       }
     } catch (err) {
       if (err.code !== 'EODHD_UNSUPPORTED' && err.code !== 'EODHD_NO_KEY' && err.code !== 'EODHD_BUDGET_EXHAUSTED') {
         trackCall();
-        cbRecord('eodhd', false);
+        cbRecord('eodhd', false, ticker);
         errors.push(`eodhd: ${err.message}`);
       }
     }
@@ -253,13 +300,13 @@ async function fetchCandles(ticker, dateFrom, dateTo) {
     try {
       const candles = await withRetry(() => yahooProvider.fetchCandles(ticker, dateFrom, dateTo));
       trackCall();
-      cbRecord('yahoo', true);
+      cbRecord('yahoo', true, ticker);
       if (candles && candles.length > 0) {
         return { provider: 'yahoo', candles };
       }
     } catch (err) {
       trackCall();
-      cbRecord('yahoo', false);
+      cbRecord('yahoo', false, ticker);
       if (err.code !== 'YAHOO_UNSUPPORTED') {
         errors.push(`yahoo: ${err.message}`);
       }
@@ -305,4 +352,4 @@ async function healthCheckAll() {
   }));
 }
 
-module.exports = { fetchCandles, fetchBatchQuotes, healthCheckAll, getBudgetStats };
+module.exports = { fetchCandles, fetchBatchQuotes, healthCheckAll, getBudgetStats, isDegraded };

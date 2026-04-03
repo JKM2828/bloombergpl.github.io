@@ -73,10 +73,12 @@ function trainForTicker(ticker, opts = {}) {
     console.log(`[ml] ${ticker}(${inst?.type}): adaptive mode – ${trainingData.length} samples`);
   }
 
-  // Split train/validate (80/20)
-  const splitIdx = Math.floor(trainingData.length * 0.8);
-  const trainSet = trainingData.slice(0, splitIdx);
-  const valSet = trainingData.slice(splitIdx);
+  // Split train/validate (80/20) — TEMPORAL split to prevent data leakage
+  // Data is ordered DESC from query, reverse for chronological order
+  const chronological = trainingData.reverse();
+  const splitIdx = Math.floor(chronological.length * 0.8);
+  const trainSet = chronological.slice(0, splitIdx);
+  const valSet = chronological.slice(splitIdx);
 
   // Train custom neural network (18 inputs → 24 → 12 → 3 outputs)
   const inputSize = trainSet[0].input.length;
@@ -155,8 +157,19 @@ function predict(ticker, horizonDays = 5) {
   // Neural network prediction (array: [up, down, returnMag])
   let nnPred = null;
   if (trainedNets[ticker]) {
-    const raw = trainedNets[ticker].run(inputArr);
-    nnPred = { up: raw[0], down: raw[1], returnMag: raw[2] };
+    // Validate input: ensure no NaN/Infinity reaches NN
+    const hasInvalid = inputArr.some(v => !Number.isFinite(v));
+    if (!hasInvalid) {
+      const raw = trainedNets[ticker].run(inputArr);
+      // Guard: validate NN output
+      if (raw.every(v => Number.isFinite(v))) {
+        nnPred = { up: raw[0], down: raw[1], returnMag: raw[2] };
+      } else {
+        console.warn(`[ml] ${ticker}: NN returned NaN/Infinity, falling back to rules`);
+      }
+    } else {
+      console.warn(`[ml] ${ticker}: input contains NaN/Infinity, falling back to rules`);
+    }
   }
 
   // Rule-based signals (ensemble member 2)
@@ -170,7 +183,9 @@ function predict(ticker, horizonDays = 5) {
   const downProb = (nnPred ? nnPred.down * nnWeight : 0) + rulePred.downProb * ruleWeight;
 
   const direction = upProb > downProb ? 'BUY' : upProb < downProb ? 'SELL' : 'HOLD';
-  const confidence = Math.abs(upProb - downProb);
+  // Calibrated confidence: cap at 0.95 and apply sigmoid squash to avoid overconfidence
+  const rawConf = Math.abs(upProb - downProb);
+  const confidence = Math.min(rawConf / (rawConf + 0.15), 0.95);
 
   // Expected return from NN magnitude
   let expectedReturn = 0;
@@ -354,7 +369,7 @@ function normalizeInputs(f) {
   // 18 inputs: 13 original + 5 new (pivot, vwap, mom5d, mom10d, relStrength)
   if (f.rsi14 == null) return null;
 
-  return {
+  const raw = {
     rsi14: (f.rsi14 || 50) / 100,
     rsi7: (f.rsi7 || 50) / 100,
     macd_norm: Math.tanh((f.macd || 0) / 10),
@@ -377,6 +392,13 @@ function normalizeInputs(f) {
     mom10d: Math.tanh((f.momentum_10d || 0) * 5),
     rel_strength: Math.tanh((f.relative_strength || 0) * 5),
   };
+
+  // Guard: replace any NaN/Infinity with 0 to prevent NN corruption
+  for (const key of Object.keys(raw)) {
+    if (!Number.isFinite(raw[key])) raw[key] = 0;
+  }
+
+  return raw;
 }
 
 function r4(v) { return v != null ? Math.round(v * 10000) / 10000 : null; }

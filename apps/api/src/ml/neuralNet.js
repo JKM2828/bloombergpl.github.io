@@ -93,8 +93,12 @@ class NeuralNetwork {
    * @returns {number[]} output values
    */
   run(input) {
-    const activations = this.forward(input);
-    return activations[activations.length - 1];
+    // Guard: clamp any NaN/Infinity in input to 0
+    const safeInput = input.map(v => Number.isFinite(v) ? v : 0);
+    const activations = this.forward(safeInput);
+    const output = activations[activations.length - 1];
+    // Guard: clamp output
+    return output.map(v => Number.isFinite(v) ? v : 0.5);
   }
 
   /**
@@ -130,7 +134,8 @@ class NeuralNetwork {
       });
     }
 
-    // Update weights and biases
+    // Update weights and biases (with gradient clipping)
+    const GRAD_CLIP = 5.0;
     for (let l = 0; l < numLayers; l++) {
       const prevAct = activations[l];
       const delta = deltas[l];
@@ -138,10 +143,13 @@ class NeuralNetwork {
       const b = this.biases[l];
 
       for (let j = 0; j < delta.length; j++) {
+        // Clip delta to prevent exploding gradients
+        const clippedDelta = Math.max(-GRAD_CLIP, Math.min(GRAD_CLIP, delta[j]));
         for (let k = 0; k < prevAct.length; k++) {
-          W[j][k] -= this.learningRate * (delta[j] * prevAct[k] + this.l2Lambda * W[j][k]);
+          const grad = clippedDelta * prevAct[k] + this.l2Lambda * W[j][k];
+          W[j][k] -= this.learningRate * Math.max(-GRAD_CLIP, Math.min(GRAD_CLIP, grad));
         }
-        b[j] -= this.learningRate * delta[j];
+        b[j] -= this.learningRate * clippedDelta;
       }
     }
 

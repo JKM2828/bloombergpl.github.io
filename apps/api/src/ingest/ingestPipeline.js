@@ -45,6 +45,26 @@ let lastCycleStats = null;
 function getLastCycleStats() { return lastCycleStats; }
 
 /**
+ * Get current Warsaw hour/minute/dayOfWeek using Intl API (handles DST correctly).
+ * @returns {{ dow: number, h: number, m: number, minuteOfDay: number }}
+ */
+function warsawNow(now) {
+  if (!now) now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Warsaw',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', weekday: 'short',
+    hour12: false,
+  }).formatToParts(now);
+  const get = type => parts.find(p => p.type === type)?.value;
+  const h = parseInt(get('hour'), 10);
+  const m = parseInt(get('minute'), 10);
+  const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const dow = dayMap[get('weekday')] ?? now.getDay();
+  return { dow, h, m, minuteOfDay: h * 60 + m };
+}
+
+/**
  * Check if a ticker already has fresh data.
  * Daily candles: fresh if last candle date is from today or the previous trading day.
  * During market hours we still accept same-day or prev-trading-day dailies as fresh
@@ -60,14 +80,7 @@ function isTickerFresh(ticker) {
   const lastDate = new Date(row.date);
   const now = new Date();
 
-  // Use Warsaw timezone for day-of-week (Heroku runs UTC)
-  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-  const jan = new Date(now.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(now.getFullYear(), 6, 1).getTimezoneOffset();
-  const isDST = now.getTimezoneOffset() < Math.max(jan, jul);
-  const warsawOffset = isDST ? 2 : 1;
-  const warsaw = new Date(utc + warsawOffset * 3600000);
-  const dow = warsaw.getDay(); // 0=Sun, 6=Sat
+  const { dow } = warsawNow(now);
 
   // Calendar-day logic for daily candles
   const diffDays = Math.floor((now - lastDate) / 86400000);
@@ -83,17 +96,8 @@ function isTickerFresh(ticker) {
  * Check if current time is within GPW market hours (Mon-Fri 9:00-17:30 Warsaw).
  */
 function isMarketHours(now) {
-  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-  const jan = new Date(now.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(now.getFullYear(), 6, 1).getTimezoneOffset();
-  const isDST = now.getTimezoneOffset() < Math.max(jan, jul);
-  const warsawOffset = isDST ? 2 : 1;
-  const warsaw = new Date(utc + warsawOffset * 3600000);
-  const dow = warsaw.getDay();
+  const { dow, minuteOfDay } = warsawNow(now);
   if (dow === 0 || dow === 6) return false;
-  const h = warsaw.getHours();
-  const m = warsaw.getMinutes();
-  const minuteOfDay = h * 60 + m;
   return minuteOfDay >= 9 * 60 && minuteOfDay < 17 * 60 + 30;
 }
 

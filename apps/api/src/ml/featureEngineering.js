@@ -187,7 +187,7 @@ function computeSingleBar(slice, idx, allCandles) {
   // Body as % of range (large = decisive move)
   const bodyPct = todayRange > 0 ? Math.abs(last.close - last.open) / todayRange : 0;
 
-  return {
+  return sanitizeFeatures({
     sma20: r(sma20Val), sma50: r(sma50Val), sma200: r(sma200Val),
     ema12: r(ema12Val), ema26: r(ema26Val),
     rsi14: r(rsi14Val), rsi7: r(rsi7Val),
@@ -202,7 +202,20 @@ function computeSingleBar(slice, idx, allCandles) {
     momentum_5d: r(mom5d), momentum_10d: r(mom10d),
     gap_pct: r(gapPct), range_expansion: r(rangeExpansion), vol_accel: r(volAccel),
     close_position: r(closePos), upper_shadow_pct: r(upperShadow), body_pct: r(bodyPct),
-  };
+  });
+}
+
+/**
+ * Sanitize feature object: replace NaN/Infinity with null (except regime string).
+ */
+function sanitizeFeatures(feat) {
+  for (const key of Object.keys(feat)) {
+    if (key === 'regime') continue;
+    if (feat[key] != null && !Number.isFinite(feat[key])) {
+      feat[key] = null;
+    }
+  }
+  return feat;
 }
 
 // ---- Helper: MACD signal (9-EMA of MACD line) ----

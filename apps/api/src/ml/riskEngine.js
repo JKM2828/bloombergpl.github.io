@@ -52,8 +52,10 @@ function calculatePositionSize(prediction, portfolioBalance) {
 
   const { confidence, expectedReturn, scenarios } = prediction;
 
-  // Estimate win probability and win/loss ratio from scenarios
-  const winProb = Math.min(Math.max(0.5 + confidence / 2, 0.01), 0.99);
+  // Estimate win probability: calibrated from confidence, bounded conservatively
+  // Uses logistic squash: P(win) = 0.5 + 0.3 * tanh(confidence * 2)
+  // This prevents overconfident sizing (max winProb ~0.8 instead of 0.99)
+  const winProb = Math.min(Math.max(0.5 + 0.3 * Math.tanh(confidence * 2), 0.10), 0.85);
   const avgWin = Math.abs(scenarios.bull + scenarios.base) / 2;
   const avgLoss = Math.abs(scenarios.bear);
   const winLossRatio = avgLoss > 0 ? avgWin / avgLoss : 1;
@@ -93,11 +95,20 @@ function calculateStopLevels(ticker, entryPrice) {
 
   // Get latest ATR from features
   const features = queryOne(
-    'SELECT atr14 FROM features WHERE ticker = ? ORDER BY date DESC LIMIT 1',
+    'SELECT atr14, vol_20d FROM features WHERE ticker = ? ORDER BY date DESC LIMIT 1',
     [ticker]
   );
 
-  const atr = features?.atr14 || entryPrice * 0.02; // fallback: 2% of price
+  // Volatility-aware ATR fallback: use vol_20d if available, else conservative 3%
+  let atr;
+  if (features?.atr14 && Number.isFinite(features.atr14) && features.atr14 > 0) {
+    atr = features.atr14;
+  } else if (features?.vol_20d && Number.isFinite(features.vol_20d)) {
+    // Approximate daily ATR from annualized vol: vol_20d / sqrt(252)
+    atr = entryPrice * features.vol_20d / Math.sqrt(252);
+  } else {
+    atr = entryPrice * 0.03; // conservative 3% fallback
+  }
 
   const stopLoss = entryPrice - atr * RISK_CONFIG.stopLossATRMultiple;
   const takeProfit = entryPrice + atr * RISK_CONFIG.takeProfitATRMultiple;
@@ -352,8 +363,17 @@ function computeSellLevels(ticker, entryPrice) {
     'SELECT atr14, vol_20d, rsi14, macd_hist, regime FROM features WHERE ticker = ? ORDER BY date DESC LIMIT 1',
     [ticker]
   );
-  const atr = features?.atr14 || entryPrice * 0.02;
-  const vol = features?.vol_20d || 0.25;
+
+  // Volatility-aware ATR fallback (mirrors calculateStopLevels)
+  let atr;
+  if (features?.atr14 && Number.isFinite(features.atr14) && features.atr14 > 0) {
+    atr = features.atr14;
+  } else if (features?.vol_20d && Number.isFinite(features.vol_20d)) {
+    atr = entryPrice * features.vol_20d / Math.sqrt(252);
+  } else {
+    atr = entryPrice * 0.03;
+  }
+  const vol = (features?.vol_20d && Number.isFinite(features.vol_20d)) ? features.vol_20d : 0.25;
 
   // Determine if this is a futures contract (wider thresholds)
   const inst = queryOne('SELECT type FROM instruments WHERE ticker = ?', [ticker]);
@@ -662,7 +682,8 @@ function computeCompetitionAllocation(pick, opts = {}) {
   }
 
   // Kelly-based allocation fraction (aggressive for competition)
-  const winProb = Math.min(Math.max(0.5 + confidence / 2, 0.01), 0.99);
+  // Calibrated logistic squash — consistent with calculatePositionSize
+  const winProb = Math.min(Math.max(0.5 + 0.3 * Math.tanh(confidence * 2), 0.10), 0.85);
   const avgWin = Math.abs(expectedReturn);
   const avgLoss = Math.abs(pick.sell?.failSafeStopPct || 6) / 100;
   const winLossRatio = avgLoss > 0 ? avgWin / avgLoss : 1;
