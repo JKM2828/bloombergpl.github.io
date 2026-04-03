@@ -2,7 +2,7 @@
 // API Routes – Express router
 // ============================================================
 const express = require('express');
-const { query, queryOne, run, saveDb } = require('../db/connection');
+const { query, queryOne, run, saveDb, getDbHealth } = require('../db/connection');
 const { runScreener, getLatestRanking, getDailyPicks, saveDailyPicks, validatePastPicks, getPickPerformance, getPickStats, getFuturesPicks, getBestToInvest, getDailyGrowthReport, getWeeklyGrowthReport } = require('../screener/rankingService');
 const { ingestAll, ingestIncremental, ingestIntraday, ingestIntraday5m, validateTicker } = require('../ingest/ingestPipeline');
 const { getLiveStats } = require('../ws/liveCandles');
@@ -579,18 +579,32 @@ router.get('/health', async (req, res) => {
   const candleCount = (queryOne('SELECT count(*) as n FROM candles') || {}).n || 0;
   const lastIngest = (queryOne("SELECT MAX(created_at) as d FROM ingest_log WHERE status = 'ok'") || {}).d || null;
 
+  // DB health
+  const dbHealth = getDbHealth();
+
+  // Queue depth
+  const pendingJobs = (queryOne("SELECT COUNT(*) as cnt FROM jobs WHERE status = 'pending'") || {}).cnt || 0;
+  const runningJobs = (queryOne("SELECT COUNT(*) as cnt FROM jobs WHERE status = 'running'") || {}).cnt || 0;
+
   const allOk = providers.every(p => p.ok);
   const anyOk = providers.some(p => p.ok);
   const anyRateLimited = providers.some(p => p.rateLimited);
   const allRateLimited = providers.every(p => p.rateLimited || !p.ok);
   // If at least one provider works → ok or degraded; all down/limited → rate_limited or down
-  const status = allOk ? 'ok' : anyOk ? 'degraded' : anyRateLimited ? 'rate_limited' : 'down';
+  const providerStatus = allOk ? 'ok' : anyOk ? 'degraded' : anyRateLimited ? 'rate_limited' : 'down';
+
+  // Overall status considers DB save failures and provider health
+  const dbOk = dbHealth.saveFailCount < 3;
+  const status = !dbOk ? 'degraded' : providerStatus;
 
   res.json({
     status,
+    uptime: process.uptime() | 0,
     instruments: instrumentCount,
     candles: candleCount,
     lastIngest,
+    db: dbHealth,
+    queue: { pending: pendingJobs, running: runningJobs },
     providers,
     live: getLiveStats(),
     precisionKPI: getPrecisionKPI(),

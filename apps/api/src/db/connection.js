@@ -30,11 +30,17 @@ function getDb() {
   return _db;
 }
 
+let _lastSaveOk = null;
+let _lastSaveError = null;
+let _saveFailCount = 0;
+
 function saveDb() {
   if (!_db) return;
   const data = _db.export();
   const buffer = Buffer.from(data);
   fs.writeFileSync(DB_PATH, buffer);
+  _lastSaveOk = new Date().toISOString();
+  _saveFailCount = 0;
 }
 
 function closeDb() {
@@ -45,13 +51,29 @@ function closeDb() {
   }
 }
 
+function getDbHealth() {
+  return {
+    initialized: !!_db,
+    dbPath: DB_PATH,
+    lastSaveOk: _lastSaveOk,
+    lastSaveError: _lastSaveError,
+    saveFailCount: _saveFailCount,
+    fileSizeBytes: fs.existsSync(DB_PATH) ? fs.statSync(DB_PATH).size : 0,
+  };
+}
+
 // Save periodically and on process exit
 let _saveInterval = null;
 function startAutoSave(intervalMs = 30000) {
   if (_saveInterval) return;
-  _saveInterval = setInterval(() => { try { saveDb(); } catch {} }, intervalMs);
-  process.on('exit', () => { try { closeDb(); } catch {} });
-  process.on('SIGINT', () => { try { closeDb(); } catch {} process.exit(0); });
+  _saveInterval = setInterval(() => {
+    try { saveDb(); }
+    catch (err) {
+      _saveFailCount++;
+      _lastSaveError = { message: err.message, at: new Date().toISOString() };
+      console.error(`[db] Auto-save failed (count=${_saveFailCount}):`, err.message);
+    }
+  }, intervalMs);
 }
 
 // ---- sql.js helper: run SELECT and return array of objects ----
@@ -80,4 +102,4 @@ function run(sql, params = []) {
   return db.getRowsModified();
 }
 
-module.exports = { initDb, getDb, saveDb, closeDb, startAutoSave, query, queryOne, run, DB_PATH };
+module.exports = { initDb, getDb, saveDb, closeDb, startAutoSave, query, queryOne, run, DB_PATH, getDbHealth };

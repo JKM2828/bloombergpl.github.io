@@ -400,15 +400,16 @@ const processors = {
         console.error(`[worker] T+1 prediction failed: ${t1Err.message}`);
       }
 
-      // Precision KPI check
+      // Precision KPI check — auto-retrain on drift
       const kpi = checkPrecisionKPI();
-      if (kpi.retrain) {
+      if (kpi.retrain || kpi.status === 'warn') {
         const alreadyTraining = queryOne(
           "SELECT 1 FROM jobs WHERE job_type = 'train' AND status IN ('pending','running')"
         );
         if (!alreadyTraining) {
-          enqueueJob('train', { reason: 'precision_kpi', precision1D: kpi.precision1D }, 2);
-          console.warn(`[worker] Emergency retrain enqueued (precision@1D=${kpi.precision1D}%)`);
+          const priority = kpi.retrain ? 2 : 4; // critical=high priority, warn=normal
+          enqueueJob('train', { reason: 'precision_kpi', precision1D: kpi.precision1D, status: kpi.status }, priority);
+          console.warn(`[worker] Auto-retrain enqueued (precision@1D=${kpi.precision1D}%, status=${kpi.status})`);
         }
       }
     } catch (err) {

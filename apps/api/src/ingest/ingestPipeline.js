@@ -30,7 +30,8 @@ function getCurrentMode() {
   try {
     // Lazy-load to avoid circular deps at module init
     return require('../worker/jobWorker').getCurrentMode();
-  } catch {
+  } catch (err) {
+    console.warn('[ingest] getCurrentMode fallback:', err.message);
     return 'market';
   }
 }
@@ -256,7 +257,8 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
               if (idx !== -1) noDataTickers.splice(idx, 1);
               console.log(`[ingest] Retry success: ${ticker} (${r.inserted} candles)`);
             }
-          } catch {
+          } catch (err) {
+            console.warn(`[ingest] Retry failed for ${ticker}: ${err.message}`);
             fallbackCallsUsed++;
             totalHttpCalls++;
           }
@@ -379,7 +381,8 @@ async function validateTicker(ticker) {
     const dateFrom = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
     const result = await providerManager.fetchCandles(ticker, dateFrom, dateTo);
     return result.candles && result.candles.length > 0;
-  } catch {
+  } catch (err) {
+    console.warn(`[ingest] validateTicker(${ticker}) failed: ${err.message}`);
     return false;
   }
 }

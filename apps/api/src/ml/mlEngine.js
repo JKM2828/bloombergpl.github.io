@@ -195,12 +195,36 @@ function predict(ticker, horizonDays = 5) {
     expectedReturn = rulePred.expectedReturn;
   }
 
-  // Scenarios (bull/base/bear) using volatility scaling
+  // Scenarios (bull/base/bear) using historical return distribution
   const vol = features.vol_20d || 0.25;
+  // Query recent daily returns to compute empirical percentiles
+  const recentReturns = query(
+    `SELECT (c2.close - c1.close) / c1.close AS ret
+     FROM candles c1
+     JOIN candles c2 ON c2.ticker = c1.ticker AND c2.date > c1.date
+       AND c2.rowid = (SELECT MIN(rowid) FROM candles WHERE ticker = c1.ticker AND date > c1.date AND (timeframe IS NULL OR timeframe = '1d'))
+     WHERE c1.ticker = ? AND (c1.timeframe IS NULL OR c1.timeframe = '1d')
+     ORDER BY c1.date DESC LIMIT 60`,
+    [ticker]
+  ).map(r => r.ret).filter(r => Number.isFinite(r)).sort((a, b) => a - b);
+
+  let bullSpread, bearSpread;
+  if (recentReturns.length >= 20) {
+    // Use 75th percentile for bull, 25th for bear
+    const p75 = recentReturns[Math.floor(recentReturns.length * 0.75)];
+    const p25 = recentReturns[Math.floor(recentReturns.length * 0.25)];
+    bullSpread = Math.max(p75, vol * 0.2);
+    bearSpread = Math.min(p25, -vol * 0.2);
+  } else {
+    // Fallback to volatility-based scaling
+    bullSpread = vol * 0.5;
+    bearSpread = -vol * 0.5;
+  }
+
   const scenarios = {
-    bull: expectedReturn + vol * 0.5,
+    bull: expectedReturn + bullSpread,
     base: expectedReturn,
-    bear: expectedReturn - vol * 0.5,
+    bear: expectedReturn + bearSpread,
   };
 
   const version = currentModelVersion || 'rules-only';

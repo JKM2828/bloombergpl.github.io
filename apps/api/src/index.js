@@ -103,18 +103,31 @@ app.get('/', (req, res) => {
   });
 });
 
+// ---- Global error handlers ----
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[process] Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[process] Uncaught Exception:', err);
+  // Give time for logs to flush, then exit
+  setTimeout(() => process.exit(1), 1000);
+});
+
 // ---- Init DB & start ----
+let _server = null;
+
 (async () => {
   await migrate();
   await seed();
   startAutoSave();
 
-  const server = http.createServer(app);
+  _server = http.createServer(app);
 
   // Attach WebSocket live feed (ws://localhost:PORT/ws/live?ticker=PKN&tf=5m)
-  attachWebSocket(server);
+  attachWebSocket(_server);
 
-  server.listen(PORT, () => {
+  _server.listen(PORT, () => {
     console.log(`\n🚀 GPW Bloomberg API v2.0 running on http://localhost:${PORT}`);
     console.log('   ML + Risk + Worker engine active');
     console.log('   WebSocket live feed: ws://localhost:' + PORT + '/ws/live?ticker=TICKER&tf=5m');
@@ -142,5 +155,33 @@ app.get('/', (req, res) => {
     console.log(`[bootstrap] Data fresh (${Math.round(hoursSinceIngest * 60)}min old) — skipping auto-ingest.`);
   }
 })();
+
+// ---- Graceful shutdown ----
+function gracefulShutdown(signal) {
+  console.log(`[process] ${signal} received — shutting down gracefully...`);
+  const { stopScheduler } = require('./worker/jobWorker');
+  const { closeDb } = require('./db/connection');
+
+  stopScheduler();
+
+  if (_server) {
+    _server.close(() => {
+      console.log('[process] HTTP server closed');
+      try { closeDb(); } catch (e) { console.error('[process] DB close error:', e.message); }
+      process.exit(0);
+    });
+    // Force exit after 10s if connections won't close
+    setTimeout(() => {
+      console.error('[process] Forced exit after 10s timeout');
+      process.exit(1);
+    }, 10000);
+  } else {
+    try { closeDb(); } catch (e) { console.error('[process] DB close error:', e.message); }
+    process.exit(0);
+  }
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 module.exports = app;

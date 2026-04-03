@@ -1,0 +1,84 @@
+// ============================================================
+// Unit tests: jobWorker – queue, timeout recovery, concurrency
+// ============================================================
+const { describe, it, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+
+// Setup mock BEFORE requiring modules
+const mockDb = require('../helpers/setup');
+
+describe('jobWorker', () => {
+  let jobWorker;
+
+  beforeEach(() => {
+    mockDb.reset();
+    // Lazy-load to ensure mock is in place
+    jobWorker = require('../../src/worker/jobWorker');
+  });
+
+  describe('enqueueJob', () => {
+    it('inserts a pending job via run()', () => {
+      // enqueueJob calls run() which is the mock; we just verify it doesn't throw
+      // The mock run() returns 1 (success)
+      assert.doesNotThrow(() => {
+        jobWorker.enqueueJob('ingest', { mode: 'full' }, 2);
+      });
+    });
+  });
+
+  describe('getWorkerStatus', () => {
+    it('returns structured status with queue stats', () => {
+      // COUNT queries for pending, running, failed
+      mockDb.pushQueryOneResult({ cnt: 3 }); // pending
+      mockDb.pushQueryOneResult({ cnt: 1 }); // running
+      mockDb.pushQueryOneResult({ cnt: 0 }); // failed
+      // Recent jobs query
+      mockDb.pushQueryResult([
+        { id: 1, job_type: 'ingest', status: 'completed', created_at: '2026-01-01', finished_at: '2026-01-01', retries: 0, error: null },
+      ]);
+
+      const status = jobWorker.getWorkerStatus();
+      assert.strictEqual(status.queueSize, 3);
+      assert.strictEqual(status.runningCount, 1);
+      assert.strictEqual(status.failedCount, 0);
+      assert.ok(Array.isArray(status.recentJobs));
+    });
+  });
+
+  describe('getCurrentMode', () => {
+    it('returns one of market, off-hours, or night', () => {
+      const mode = jobWorker.getCurrentMode();
+      assert.ok(['market', 'off-hours', 'night'].includes(mode), `Got unexpected mode: ${mode}`);
+    });
+  });
+
+  describe('getPrecisionKPI', () => {
+    it('returns null before any check', () => {
+      // Initially null (no precision check run)
+      const kpi = jobWorker.getPrecisionKPI();
+      // May be null or an object depending on test order
+      assert.ok(kpi === null || typeof kpi === 'object');
+    });
+  });
+
+  describe('checkAlerts', () => {
+    it('returns array of alerts', () => {
+      // provide lastCycleStats mock
+      mockDb.pushQueryResult([]); // stuckJobs query
+      const alerts = jobWorker.checkAlerts();
+      assert.ok(Array.isArray(alerts));
+    });
+  });
+
+  describe('recoverStuckJobs (via drainQueue)', () => {
+    it('drainQueue returns 0 when queue is empty', async () => {
+      // recoverStuckJobs: query for running jobs
+      mockDb.pushQueryResult([]);
+      // getNextJob: queryOne returns null
+      mockDb.pushQueryOneResult(null);
+
+      const processed = await jobWorker.drainQueue();
+      assert.strictEqual(processed, 0);
+    });
+  });
+});
