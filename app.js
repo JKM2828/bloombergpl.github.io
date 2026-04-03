@@ -46,32 +46,70 @@ function esc(str) {
 }
 
 const API_TIMEOUT_MS = 30000;
+const API_MAX_RETRIES = 3;
+const API_RETRY_BASE_MS = 500;
 
 async function api(path, options = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
-  try {
-    const res = await fetch(API + path, {
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      ...options,
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || res.statusText);
+  const maxRetries = options.retries ?? API_MAX_RETRIES;
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      const delay = API_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+      await new Promise(r => setTimeout(r, delay));
     }
-    return res.json();
-  } catch (err) {
-    if (err.name === 'AbortError') throw new Error('Request timeout');
-    console.error(`API ${path}:`, err);
-    throw err;
-  } finally {
-    clearTimeout(timer);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
+    try {
+      const res = await fetch(API + path, {
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        ...options,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || res.statusText);
+      }
+      return res.json();
+    } catch (err) {
+      lastErr = err.name === 'AbortError' ? new Error('Request timeout') : err;
+      // Don't retry POST/PUT/DELETE or 4xx client errors
+      if (options.method && options.method !== 'GET') throw lastErr;
+      if (attempt === maxRetries) break;
+      console.warn(`API ${path} attempt ${attempt + 1} failed: ${lastErr.message} — retrying...`);
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  console.error(`API ${path}:`, lastErr);
+  throw lastErr;
 }
 
 function pnlClass(val) { return val > 0 ? 'positive' : val < 0 ? 'negative' : ''; }
 function fmt(v, d = 2) { return v != null ? Number(v).toFixed(d) : '—'; }
+
+/** Debounce: prevents rapid-fire clicks. Returns a wrapper that disables the button during execution. */
+function debounceBtn(btnEl, handler) {
+  return async function (...args) {
+    if (btnEl.disabled) return;
+    btnEl.disabled = true;
+    try {
+      await handler.apply(this, args);
+    } finally {
+      btnEl.disabled = false;
+    }
+  };
+}
+
+/** Cached API call — returns cached data if fresh enough, otherwise fetches and caches. */
+const _apiCache = {};
+async function apiCached(path, ttlMs = 30000) {
+  const now = Date.now();
+  const entry = _apiCache[path];
+  if (entry && (now - entry.ts) < ttlMs) return entry.data;
+  const data = await api(path);
+  _apiCache[path] = { data, ts: now };
+  return data;
+}
 function dirBadge(dir) {
   const cls = dir === 'BUY' ? 'badge-buy' : dir === 'SELL' ? 'badge-sell' : 'badge-hold';
   const label = dir === 'BUY' ? 'KUP' : dir === 'SELL' ? 'SPRZEDAJ' : 'TRZYMAJ';
@@ -250,10 +288,13 @@ async function loadTop5() {
 
 async function loadSystemStatus() {
   try {
-    const [data, freshness] = await Promise.all([
-      api('/health'),
-      api('/freshness').catch(() => null),
+    const [healthRes, freshnessRes] = await Promise.allSettled([
+      apiCached('/health', 15000),
+      apiCached('/freshness', 30000),
     ]);
+    const data = healthRes.status === 'fulfilled' ? healthRes.value : null;
+    const freshness = freshnessRes.status === 'fulfilled' ? freshnessRes.value : null;
+    if (!data) { document.getElementById('system-status').textContent = 'Nie można połączyć z API'; return; }
     const statusColor = data.status === 'ok' ? 'var(--green)' : data.status === 'degraded' ? 'var(--yellow)' : 'var(--red)';
     const stooq = (data.providers || []).find((p) => p.provider === 'stooq' || p.provider === 'stooq-json');
     const allDown = (data.providers || []).every(p => !p.ok);
@@ -473,7 +514,7 @@ function showPrediction(ticker) {
 }
 
 // Prediction action buttons
-document.getElementById('btn-run-pipeline').addEventListener('click', async () => {
+document.getElementById('btn-run-pipeline').addEventListener('click', debounceBtn(document.getElementById('btn-run-pipeline'), async () => {
   const el = document.getElementById('prediction-status');
   el.innerHTML = '<span style="color:var(--yellow)">Uruchamiam pełny pipeline...</span>';
   try {
@@ -483,9 +524,9 @@ document.getElementById('btn-run-pipeline').addEventListener('click', async () =
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
   }
-});
+}));
 
-document.getElementById('btn-run-predictions').addEventListener('click', async () => {
+document.getElementById('btn-run-predictions').addEventListener('click', debounceBtn(document.getElementById('btn-run-predictions'), async () => {
   const el = document.getElementById('prediction-status');
   el.innerHTML = '<span style="color:var(--yellow)">Generuję predykcje...</span>';
   try {
@@ -495,9 +536,9 @@ document.getElementById('btn-run-predictions').addEventListener('click', async (
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
-});
+}));
 
-document.getElementById('btn-train-models').addEventListener('click', async () => {
+document.getElementById('btn-train-models').addEventListener('click', debounceBtn(document.getElementById('btn-train-models'), async () => {
   const el = document.getElementById('prediction-status');
   el.innerHTML = '<span style="color:var(--yellow)">Trenuję modele neuronowe... to może potrwać.</span>';
   try {
@@ -506,7 +547,7 @@ document.getElementById('btn-train-models').addEventListener('click', async () =
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
-});
+}));
 
 // ============================================================
 // SIGNALS
@@ -585,7 +626,7 @@ async function loadScreener() {
   }
 }
 
-document.getElementById('btn-run-screener').addEventListener('click', async () => {
+document.getElementById('btn-run-screener').addEventListener('click', debounceBtn(document.getElementById('btn-run-screener'), async () => {
   const statusEl = document.getElementById('screener-status');
   statusEl.textContent = 'Obliczam ranking...';
   try {
@@ -595,7 +636,7 @@ document.getElementById('btn-run-screener').addEventListener('click', async () =
   } catch (err) {
     statusEl.textContent = `Błąd: ${err.message}`;
   }
-});
+}));
 
 // ============================================================
 // CHART (with TradingView toggle)
@@ -1071,7 +1112,7 @@ async function loadWorker() {
   }
 }
 
-document.getElementById('btn-enqueue-pipeline').addEventListener('click', async () => {
+document.getElementById('btn-enqueue-pipeline').addEventListener('click', debounceBtn(document.getElementById('btn-enqueue-pipeline'), async () => {
   const el = document.getElementById('worker-action-status');
   el.innerHTML = '<span style="color:var(--yellow)">Uruchamiam pipeline...</span>';
   try {
@@ -1079,21 +1120,21 @@ document.getElementById('btn-enqueue-pipeline').addEventListener('click', async 
     el.innerHTML = '<span style="color:var(--green)">Pipeline uruchomiony!</span>';
     loadWorker();
   } catch (err) { el.innerHTML = `<span class="negative">${esc(err.message)}</span>`; }
-});
+}));
 
-document.getElementById('btn-enqueue-ingest').addEventListener('click', async () => {
+document.getElementById('btn-enqueue-ingest').addEventListener('click', debounceBtn(document.getElementById('btn-enqueue-ingest'), async () => {
   await api('/worker/enqueue', { method: 'POST', body: JSON.stringify({ jobType: 'ingest', payload: { mode: 'incremental' } }) });
   document.getElementById('worker-action-status').innerHTML = 'Ingest dodany do kolejki';
   loadWorker();
-});
+}));
 
-document.getElementById('btn-enqueue-train').addEventListener('click', async () => {
+document.getElementById('btn-enqueue-train').addEventListener('click', debounceBtn(document.getElementById('btn-enqueue-train'), async () => {
   await api('/worker/enqueue', { method: 'POST', body: JSON.stringify({ jobType: 'train' }) });
   document.getElementById('worker-action-status').innerHTML = 'Training dodany do kolejki';
   loadWorker();
-});
+}));
 
-document.getElementById('btn-drain-queue').addEventListener('click', async () => {
+document.getElementById('btn-drain-queue').addEventListener('click', debounceBtn(document.getElementById('btn-drain-queue'), async () => {
   const el = document.getElementById('worker-action-status');
   el.innerHTML = '<span style="color:var(--yellow)">Przetwarzam kolejkę...</span>';
   try {
@@ -1101,7 +1142,7 @@ document.getElementById('btn-drain-queue').addEventListener('click', async () =>
     el.innerHTML = `<span style="color:var(--green)">${data.message}</span>`;
     loadWorker();
   } catch (err) { el.innerHTML = `<span class="negative">${esc(err.message)}</span>`; }
-});
+}));
 
 // ============================================================
 // PORTFOLIO
