@@ -247,6 +247,15 @@ function startPolling() {
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  // Gracefully close all connected WebSocket clients
+  for (const ws of clients.keys()) {
+    try { ws.close(1001, 'Server shutting down'); } catch (_) {}
+  }
+  clients.clear();
+  subscriptions.clear();
+  if (wss) {
+    wss.close(() => { console.log('[ws] WebSocket server closed'); });
+  }
 }
 
 /**

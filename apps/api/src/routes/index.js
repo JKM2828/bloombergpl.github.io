@@ -17,6 +17,7 @@ const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStop
 const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI, getLatestPipelineRun, getPipelineRunById, checkAlerts } = require('../worker/jobWorker');
 const { getLastCycleStats } = require('../ingest/ingestPipeline');
 const { assessFeedQuality, assessAllFeedQuality } = require('../ingest/feedMonitor');
+const requireAdmin = require('../middleware/requireAdmin');
 
 const router = express.Router();
 
@@ -209,7 +210,7 @@ router.get('/ranking', (req, res) => {
   res.json({ count: ranking.length, rankedAt, dataAgeSec, ranking });
 });
 
-router.post('/ranking/run', async (req, res) => {
+router.post('/ranking/run', requireAdmin, async (req, res) => {
   try {
     const results = runScreener();
     // Auto-save top 5 as daily picks
@@ -435,7 +436,7 @@ router.post('/top-gainers/predict', (req, res) => {
   }
 });
 
-router.post('/top-gainers/train', (req, res) => {
+router.post('/top-gainers/train', requireAdmin, (req, res) => {
   try {
     const result = trainT1Model({ lookback: parseInt(req.query.lookback) || 300 });
     if (!result) return res.json({ message: 'Za mało danych do treningu T+1', result: null });
@@ -445,7 +446,7 @@ router.post('/top-gainers/train', (req, res) => {
   }
 });
 
-router.post('/top-gainers/backtest', (req, res) => {
+router.post('/top-gainers/backtest', requireAdmin, (req, res) => {
   try {
     const result = backtestT1({
       trainDays: parseInt(req.query.trainDays) || 120,
@@ -476,7 +477,7 @@ router.get('/top-gainers/kpi', (req, res) => {
 // ============================================================
 // Ingest
 // ============================================================
-router.post('/ingest/full', async (req, res) => {
+router.post('/ingest/full', requireAdmin, async (req, res) => {
   try {
     const result = await ingestAll(365, false); // full = don't skip fresh
     res.json({ message: 'Full ingest complete', ...result });
@@ -485,7 +486,7 @@ router.post('/ingest/full', async (req, res) => {
   }
 });
 
-router.post('/ingest/incremental', async (req, res) => {
+router.post('/ingest/incremental', requireAdmin, async (req, res) => {
   try {
     const result = await ingestIncremental();
     res.json({ message: 'Incremental ingest complete', ...result });
@@ -494,7 +495,7 @@ router.post('/ingest/incremental', async (req, res) => {
   }
 });
 
-router.post('/ingest/intraday', async (req, res) => {
+router.post('/ingest/intraday', requireAdmin, async (req, res) => {
   try {
     const maxTickers = parseInt(req.query.maxTickers) || 22;
     const result = await ingestIntraday(maxTickers);
@@ -504,7 +505,7 @@ router.post('/ingest/intraday', async (req, res) => {
   }
 });
 
-router.post('/ingest/intraday5m', async (req, res) => {
+router.post('/ingest/intraday5m', requireAdmin, async (req, res) => {
   try {
     const maxTickers = parseInt(req.query.maxTickers) || 200;
     const result = await ingestIntraday5m(maxTickers);
@@ -623,8 +624,16 @@ router.get('/ingest/log', (req, res) => {
 router.get('/predictions', (req, res) => {
   const limit = parseInt(req.query.limit) || 20;
   const predictions = getLatestPredictions(limit);
+  // DATA-H1: freshness gate
+  const newestPredAt = predictions.length ? predictions[0].created_at : null;
+  const dataAgeSec = newestPredAt ? Math.round((Date.now() - new Date(newestPredAt).getTime()) / 1000) : null;
+  const FRESHNESS_GATE_SEC = 86400; // 24h — predictions are batch-generated daily
+  const isMarket = getCurrentMode() === 'market';
+  const stale = isMarket && dataAgeSec != null && dataAgeSec > FRESHNESS_GATE_SEC;
   res.json({
     count: predictions.length,
+    dataAgeSec,
+    stale,
     disclaimer: 'Prognozy generowane przez model ML. Nie stanowią porady inwestycyjnej.',
     predictions,
   });
@@ -640,7 +649,7 @@ router.get('/predictions/:ticker', (req, res) => {
   });
 });
 
-router.post('/predictions/run', async (req, res) => {
+router.post('/predictions/run', requireAdmin, async (req, res) => {
   try {
     const horizonDays = parseInt(req.body.horizonDays) || 5;
     const predictions = predictAll(horizonDays);
@@ -662,8 +671,16 @@ router.post('/predictions/run', async (req, res) => {
 router.get('/signals', (req, res) => {
   const limit = parseInt(req.query.limit) || 20;
   const signals = getLatestSignals(limit);
+  // DATA-H1: freshness gate
+  const newestSigAt = signals.length ? signals[0].created_at : null;
+  const dataAgeSec = newestSigAt ? Math.round((Date.now() - new Date(newestSigAt).getTime()) / 1000) : null;
+  const FRESHNESS_GATE_SEC = 86400; // 24h
+  const isMarket = getCurrentMode() === 'market';
+  const stale = isMarket && dataAgeSec != null && dataAgeSec > FRESHNESS_GATE_SEC;
   res.json({
     count: signals.length,
+    dataAgeSec,
+    stale,
     disclaimer: 'Sygnały informacyjne. Nie stanowią rekomendacji inwestycyjnej.',
     riskLimits: RISK_CONFIG,
     signals,
@@ -673,16 +690,16 @@ router.get('/signals', (req, res) => {
 // ============================================================
 // ML Training
 // ============================================================
-router.post('/ml/train', async (req, res) => {
+router.post('/ml/train', requireAdmin, async (req, res) => {
   try {
-    const results = trainAll(req.body || {});
+    const results = await trainAll(req.body || {});
     res.json({ message: 'Training complete', models: results.length, results });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post('/ml/features', (req, res) => {
+router.post('/ml/features', requireAdmin, (req, res) => {
   try {
     const force = req.query.force === '1' || req.query.force === 'true';
     const count = computeAllFeatures({ force });
@@ -709,7 +726,7 @@ router.get('/ml/models', (req, res) => {
 // ============================================================
 // Backtest
 // ============================================================
-router.post('/ml/backtest', async (req, res) => {
+router.post('/ml/backtest', requireAdmin, async (req, res) => {
   try {
     const results = backtestAll(req.body || {});
     res.json(results);
@@ -749,14 +766,14 @@ router.get('/worker/status', (req, res) => {
   res.json(getWorkerStatus());
 });
 
-router.post('/worker/enqueue', (req, res) => {
+router.post('/worker/enqueue', requireAdmin, (req, res) => {
   const { jobType, payload, priority } = req.body;
   if (!jobType) return res.status(400).json({ error: 'jobType required' });
   enqueueJob(jobType, payload || {}, priority || 5);
   res.json({ message: `Job '${jobType}' enqueued` });
 });
 
-router.post('/worker/drain', async (req, res) => {
+router.post('/worker/drain', requireAdmin, async (req, res) => {
   try {
     const processed = await drainQueue();
     res.json({ message: `Queue drained: ${processed} jobs processed` });
@@ -765,12 +782,15 @@ router.post('/worker/drain', async (req, res) => {
   }
 });
 
-// Full pipeline trigger
-router.post('/pipeline/run', async (req, res) => {
+// Full pipeline trigger (async — returns 202 immediately)
+router.post('/pipeline/run', requireAdmin, async (req, res) => {
   try {
     enqueueJob('full_pipeline', {}, 1);
-    const processed = await drainQueue();
-    res.json({ message: 'Full pipeline executed', jobsProcessed: processed });
+    // Fire-and-forget: drain in background, don't block the HTTP response
+    drainQueue().catch(err => console.error('[pipeline/run] Background drain error:', err.message));
+    res.status(202).json({
+      message: 'Pipeline queued — use GET /api/pipeline/latest to track progress',
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1329,7 +1349,7 @@ router.get('/competition/decision', (req, res) => {
 // ============================================================
 // Competition Auto-Buy — one-click guardrail-validated purchase
 // ============================================================
-router.post('/competition/auto-buy', (req, res) => {
+router.post('/competition/auto-buy', requireAdmin, (req, res) => {
   const budget = parseFloat(req.body.budget) || COMPETITION_DEFAULTS.budget;
   const overrideTicker = req.body.ticker;  // optional: force a specific pick
   const overrideDuplicate = req.body.overrideDuplicate === true;
@@ -1528,7 +1548,7 @@ router.get('/competition/portfolio', (req, res) => {
   });
 });
 
-router.post('/competition/buy', (req, res) => {
+router.post('/competition/buy', requireAdmin, (req, res) => {
   const { ticker, shares, entry_price, entry_date, notes } = req.body;
   if (!ticker || !shares || !entry_price) {
     return res.status(400).json({ error: 'ticker, shares, entry_price required' });
@@ -1543,7 +1563,7 @@ router.post('/competition/buy', (req, res) => {
   res.json({ message: `Bought ${shares} ${ticker.toUpperCase()} @ ${entry_price}` });
 });
 
-router.post('/competition/sell', (req, res) => {
+router.post('/competition/sell', requireAdmin, (req, res) => {
   const { positionId, exit_price, exit_date } = req.body;
   if (!positionId || !exit_price) {
     return res.status(400).json({ error: 'positionId, exit_price required' });

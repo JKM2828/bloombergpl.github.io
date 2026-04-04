@@ -238,7 +238,7 @@ const processors = {
   },
 
   async train(payload) {
-    trainAll(payload);
+    await trainAll(payload);
     stats.lastTraining = new Date().toISOString();
   },
 
@@ -246,6 +246,18 @@ const processors = {
     const predictions = predictAll(payload.horizonDays || 5);
     generateAllSignals(predictions);
     stats.lastPrediction = new Date().toISOString();
+    // DATA-M1: Precision KPI check after every predictAll, not only after training
+    const kpi = checkPrecisionKPI();
+    if (kpi.retrain || kpi.status === 'warn') {
+      const alreadyTraining = queryOne(
+        "SELECT 1 FROM jobs WHERE job_type = 'train' AND status IN ('pending','running')"
+      );
+      if (!alreadyTraining) {
+        const priority = kpi.retrain ? 2 : 4;
+        enqueueJob('train', { reason: 'precision_kpi_predict', precision1D: kpi.precision1D, status: kpi.status }, priority);
+        console.warn(`[worker] Auto-retrain enqueued after predict (precision@1D=${kpi.precision1D}%, status=${kpi.status})`);
+      }
+    }
   },
 
   async screener(_payload) {

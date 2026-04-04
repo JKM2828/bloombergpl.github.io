@@ -23,10 +23,27 @@ const app = express();
 
 // ---- Middleware ----
 app.use(helmet({
-  contentSecurityPolicy: false,   // allow inline scripts in frontend
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],  // needed for inline scripts in frontend
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:"],
+      connectSrc: ["'self'", "wss:", "ws:"],
+    },
+  },
   crossOriginEmbedderPolicy: false,
 }));
-app.use(cors({ origin: '*' }));
+
+// CORS — restrict to known origins (fallback: allow all in dev)
+const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
+  : null; // null = allow all (dev mode)
+app.use(cors({
+  origin: ALLOWED_ORIGINS || '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-ID'],
+}));
 app.use(express.json());
 
 // Rate limiting — 120 req/min per IP (generous for dashboard polling)
@@ -38,6 +55,21 @@ const apiLimiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' },
 });
 app.use('/api', apiLimiter);
+
+// Stricter rate-limit for costly / admin POST endpoints (3 req / 10 min)
+const costlyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Rate limit exceeded for costly operation. Try again in a few minutes.' },
+});
+const costlyPaths = [
+  '/api/pipeline/run', '/api/ml/train', '/api/ml/backtest', '/api/ml/features',
+  '/api/ingest/full', '/api/ingest/incremental', '/api/ingest/intraday', '/api/ingest/intraday5m',
+  '/api/predictions/run', '/api/ranking/run', '/api/worker/drain', '/api/worker/enqueue',
+];
+costlyPaths.forEach(p => app.use(p, costlyLimiter));
 
 // X-Request-ID — trace every request
 app.use((req, res, next) => {
@@ -161,8 +193,10 @@ function gracefulShutdown(signal) {
   console.log(`[process] ${signal} received — shutting down gracefully...`);
   const { stopScheduler } = require('./worker/jobWorker');
   const { closeDb } = require('./db/connection');
+  const { stopPolling } = require('./ws/liveCandles');
 
   stopScheduler();
+  stopPolling();
 
   if (_server) {
     _server.close(() => {

@@ -1,9 +1,10 @@
-# GPW Bloomberg -- Platforma Analityczna GPW
+﻿# GPW Bloomberg — Platforma Analityczna GPW
 
-> Panel analityczny w stylu Bloomberg dla Gieldy Papierow Wartosciowych w Warszawie.
-> Dane wylacznie z serwisu **Stooq** (darmowe, dzienne swieczkowe). Wykresy, screening, ranking, predykcje ML oraz symulacyjny portfel.
+> Panel analityczny w stylu Bloomberg dla Giełdy Papierów Wartościowych w Warszawie.
+> 5-poziomowy łańcuch providerów: **GPW API → Stooq JSON → Stooq CSV → EODHD → Yahoo Finance**.
+> Wykresy live (WebSocket 5m), screening, ranking, predykcje ML oraz symulacyjny portfel.
 
-**DISCLAIMER:** Aplikacja ma charakter wylacznie informacyjny i edukacyjny. Nie stanowi porady inwestycyjnej ani rekomendacji w rozumieniu przepisow prawa. Inwestowanie w instrumenty finansowe wiaze sie z ryzykiem utraty kapitalu.
+**DISCLAIMER:** Aplikacja ma charakter wyłącznie informacyjny i edukacyjny. Nie stanowi porady inwestycyjnej ani rekomendacji w rozumieniu przepisów prawa. Inwestowanie w instrumenty finansowe wiąże się z ryzykiem utraty kapitału.
 
 ---
 
@@ -11,53 +12,60 @@
 
 ```
 GPW Blooomberg/
-packages/shared/       # Wspolne modele, wskazniki techniczne, mapowania tickerow
-apps/api/              # Backend -- Express.js + SQLite (sql.js)
+packages/shared/       # Wspólne modele, wskaźniki techniczne, mapowania tickerów
+apps/api/              # Backend — Express.js + SQLite (sql.js) + WebSocket
   src/
-    db/                # Polaczenie, migracje, seed
-    providers/         # Adapter danych: Stooq (jedyne zrodlo)
-    ingest/            # Pipeline pobierania i normalizacji danych
+    db/                # Połączenie, migracje, seed, atomowy zapis
+    providers/         # 5-poziomowy łańcuch providerów z circuit breaker
+    ingest/            # Pipeline pobierania, feedMonitor, intraday 5m
     screener/          # Silnik screeningu i rankingu
     ml/                # Neural network, feature engineering, risk engine
-    portfolio/         # Symulacyjny portfel (wplata/wyplata/kup/sprzedaj)
-    worker/            # 24/7 scheduler (cron jobs)
-    routes/            # REST API endpoints
-apps/web/              # Frontend -- vanilla JS + Lightweight Charts + Lucide
+    portfolio/         # Symulacyjny portfel (wpłata/wypłata/kup/sprzedaj)
+    worker/            # 24/7 scheduler (cron jobs) + precision KPI watch
+    routes/            # REST API ~50 endpointów + auth middleware
+    ws/                # WebSocket live 5-minutowe świeczki
+apps/web/              # Frontend — vanilla JS + Lightweight Charts
   public/
     index.html
     style.css
     app.js
 ```
 
-## Zrodlo danych
+## Źródła danych (5-poziomowy failover)
 
-- **Provider**: Stooq (stooq.pl) -- jedyne zrodlo, fail-closed (brak danych = brak wyswietlania)
-- **Typ**: dzienne swieczki OHLCV (EOD -- end of day)
-- **Odswiazanie**: co 15 min w godzinach sesji GPW (Pn-Pt 9:00-17:15), pelny ingest w sobote
-- **Opoznienie**: dane sa opoznione (Stooq nie gwarantuje czasu rzeczywistego)
-- **Walidacja**: odrzucanie outlierow (>50% skok dzienny), kontrola high>=low, brak wartosci ujemnych
+| Tier | Provider | Instrumenty | Typ |
+|------|----------|-------------|-----|
+| 1 | GPW API (`GPW_API_KEY`) | Wszystkie | Daily + intraday 5m |
+| 2 | Stooq JSON batch | Wszystkie | Daily batch |
+| 3 | Stooq CSV | Wszystkie | Daily historical |
+| 4 | EODHD (`EODHD_API_KEY`) | Akcje, ETF, indeksy | Daily |
+| 5 | Yahoo Finance | Akcje, ETF | Daily |
+
+- Circuit breaker: provider wyłączany po 5 błędach (10 min cooldown)
+- Per-ticker circuit: wyłączany po 3 błędach (30 min cooldown)
+- Globalny limit HTTP: `GLOBAL_DAILY_HTTP_LIMIT` (domyślnie 500/dzień)
 
 ## Instrumenty GPW
 
-- **29 akcji** (WIG20 + selekcja mWIG40: PKN, PKO, PZU, KGHM, CDR, ALE, LPP, DNP, XTB i wiecej)
-- **6 ETF-ow** (WIG20, WIG20 Short, WIG20 Lev, S&P500, DAX, mWIG40)
+Instrumenty przechowywane dynamicznie w tabeli `instruments`. Typowy zestaw:
+- **~29 akcji** (WIG20 + mWIG40: PKN, PKO, PZU, KGHM, CDR, ALE, LPP, XTB i więcej)
+- **~6 ETF-ów** (WIG20, WIG20 Short, WIG20 Lev, S&P500, DAX, mWIG40)
 - **4 indeksy** (WIG, WIG20, mWIG40, sWIG80)
 - **2 kontrakty** (FW20, FW40)
 
-Kazdy instrument ma przypisany sektor (np. Banki, Energetyka, IT).
-
 ## Funkcje
 
-| Modul | Opis |
+| Moduł | Opis |
 |-------|------|
-| **Dashboard** | Przeglad rynku, TOP/BOTTOM spolki, lista instrumentow z filtrowaniem |
-| **Predykcje ML** | Sieci neuronowe + reguly techniczne, predykcje 5-dniowe |
-| **Sygnaly** | Rekomendacje z pozycjonowaniem Kelly + ATR stop-loss/take-profit |
-| **Screener** | Ranking wg: momentum, RSI, zmiennosc, wolumen, drawdown, SMA crossover |
-| **Wykresy** | Interaktywne wykresy OHLCV + SMA20/50 + wolumen (Lightweight Charts) |
-| **Portfel** | Symulacja: wplata/wyplata PLN, kupno/sprzedaz akcji, PnL, historia |
+| **Dashboard** | Przegląd rynku, TOP/BOTTOM spółki, lista instrumentów |
+| **Predykcje ML** | Neural net + reguły techniczne, predykcje 5-dniowe z freshness gate |
+| **Sygnały** | Kelly + ATR stop-loss/take-profit, freshness gate |
+| **Screener** | Ranking wg: momentum, RSI, zmienność, wolumen, SMA crossover |
+| **Wykresy** | Interaktywne OHLCV + SMA20/50 + wolumen (Lightweight Charts) |
+| **Live Feed** | WebSocket `wss://.../ws/live?ticker=X&tf=5m` — live świeczki 5m |
+| **Portfel** | Symulacja: wpłata/wypłata PLN, kupno/sprzedaż, PnL, historia |
 | **Ryzyko** | Ekspozycja portfela, koncentracja, Kelly criterion |
-| **Status** | Health check Stooq, logi ingest, metryki systemu, swiezosc danych |
+| **Status** | Health check providerów, circuit breaker state, świeżość danych |
 
 ## Szybki start
 
@@ -65,62 +73,72 @@ Kazdy instrument ma przypisany sektor (np. Banki, Energetyka, IT).
 - Node.js 18+
 - npm
 
+### Zmienne środowiskowe
+
+```bash
+ADMIN_API_KEY=<długi-losowy-klucz>    # wymagane w produkcji
+CORS_ORIGINS=https://twoja-domena.vercel.app,http://localhost:3001
+
+GPW_API_KEY=<klucz-gpw>               # opcjonalne (tier 1)
+EODHD_API_KEY=<klucz-eodhd>           # opcjonalne (tier 4)
+GLOBAL_DAILY_HTTP_LIMIT=500
+PORT=3001
+```
+
 ### Instalacja
 
 ```bash
 cd apps/api
 npm install
-
-# Uruchom serwer (automatycznie: migrate + seed + scheduler)
-npm start
-# lub: node src/index.js
+npm start          # migrate + seed + scheduler + server
 ```
 
-### Pierwsze uzycie
+Frontend na http://localhost:3001.
 
-1. Otworz **http://localhost:3001** -- frontend serwowany statycznie z backendu
-2. Przejdz do zakladki **Status** -> kliknij **"Pobierz wszystkie dane"** (pelny ingest ze Stooq)
-3. Po zakonczeniu ingest -> **Screener** -> **"Przelicz ranking"**
-4. Gotowe! Przegladaj wykresy, ranking i zarzadzaj symulacyjnym portfelem
+## API Endpoints (wybór)
 
-## API Endpoints
+POST wymagają nagłówka `X-API-Key: <ADMIN_API_KEY>` lub `Authorization: Bearer <klucz>`.
 
-| Metoda | Endpoint | Opis |
-|--------|----------|------|
-| GET | `/api/instruments` | Lista instrumentow (filter: `?type=STOCK`) |
-| GET | `/api/instruments/:ticker` | Profil instrumentu + cena + sektor |
-| GET | `/api/candles/:ticker` | Dane OHLCV + wskazniki + swiezosc |
-| GET | `/api/freshness` | Swiezosc danych per ticker |
-| GET | `/api/ranking` | Aktualny ranking |
-| POST | `/api/ranking/run` | Przelicz ranking |
-| POST | `/api/ingest/full` | Pelny ingest (365 dni) |
-| POST | `/api/ingest/incremental` | Aktualizacja (30 dni) |
-| GET | `/api/predictions` | Predykcje ML |
-| GET | `/api/signals` | Sygnaly handlowe |
-| GET | `/api/risk/portfolio` | Analiza ryzyka portfela |
-| GET | `/api/health` | Status systemu i providera Stooq |
+| Metoda | Endpoint | Auth | Opis |
+|--------|----------|------|------|
+| GET | `/api/instruments` | — | Lista instrumentów |
+| GET | `/api/candles/:ticker` | — | Dane OHLCV + wskaźniki |
+| GET | `/api/freshness` | — | Świeżość danych |
+| GET | `/api/ranking` | — | Aktualny ranking |
+| POST | `/api/ranking/run` | ✓ | Przelicz ranking |
+| POST | `/api/ingest/full` | ✓ | Pełny ingest (365 dni) |
+| POST | `/api/pipeline/run` | ✓ | Pełny pipeline (202 + polling) |
+| GET | `/api/pipeline/status` | — | Status pipeline run |
+| GET | `/api/predictions` | — | Predykcje ML + dataAgeSec + stale |
+| GET | `/api/signals` | — | Sygnały + dataAgeSec + stale |
+| POST | `/api/ml/train` | ✓ | Trening modeli ML (async) |
+| GET | `/api/health` | — | Status systemu i providerów |
+| WS | `/ws/live?ticker=X&tf=5m` | — | Live 5m świeczki |
 
 ## Harmonogram 24/7
 
-| Kiedy | Co | Priorytet |
-|-------|----|-----------|
-| */15 9-17 Pn-Pt | Ingest przyrostowy | 3 |
-| 5,35 9-17 Pn-Pt | Feature computation | 4 |
-| 10,40 9-17 Pn-Pt | Predykcje + sygnaly | 5 |
-| 15,45 9-17 Pn-Pt | Screener update | 6 |
-| 18:00 Pn-Pt | Trening modeli | 2 |
-| 18:30 Pn-Pt | Pelny pipeline (ingest+features+predict+screener) | 1 |
-| 8:00 Sob | Weekend full ingest + retrain | 1-4 |
+| Kiedy | Co |
+|------|-----|
+| `*/5 9-16 Pn-Pt` | Ingest intraday 5m |
+| `*/15 9-17 Pn-Pt` | Ingest przyrostowy |
+| `18:00 Pn-Pt` | Trening modeli (async, yield event loop) |
+| `18:30 Pn-Pt` | Pełny pipeline |
+| `8:00 Sob` | Weekend full ingest + retrain |
+
+## Bezpieczeństwo
+
+- Auth: API key na destruktywnych POST (requireAdmin middleware)
+- CORS: ograniczony do CORS_ORIGINS env var
+- CSP: script-src 'self' 'unsafe-inline'
+- Rate limit: 120 req/min + 3 req/10min na kosztowne operacje
+- XSS: wszystkie dane API w innerHTML przepuszczone przez esc()
+- SQL: zapytania parametryzowane
 
 ## Ograniczenia
 
-- Stooq nie oferuje oficjalnego API -- dane pobierane z CSV endpoint, moga ulec zmianie
-- Dane sa dzienne (EOD), nie intraday real-time
-- Dane maja charakter best-effort, mozliwe opoznienia lub braki
-- Portfel jest **symulacyjny** -- brak realnych transakcji
-- Brak integracji z brokerem
+- Portfel jest **symulacyjny** — brak realnych transakcji, brak integracji z brokerem
 - Nie jest to licencjonowane doradztwo inwestycyjne
 
 ## Licencja
 
-MIT -- do uzytku edukacyjnego i osobistego.
+MIT — do użytku edukacyjnego i osobistego.

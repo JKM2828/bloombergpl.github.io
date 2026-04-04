@@ -352,4 +352,4 @@ async function healthCheckAll() {
   }));
 }
 
-module.exports = { fetchCandles, fetchBatchQuotes, healthCheckAll, getBudgetStats, isDegraded };
+module.exports = { fetchCandles, fetchBatchQuotes, healthCheckAll, getBudgetStats, isDegraded, _test: { cbRecord, cbIsOpen, tickerCbIsOpen, circuitState, tickerCircuitState, budgetAlertState, trackCall, globalBudgetRemaining, resetGlobalCounter } };

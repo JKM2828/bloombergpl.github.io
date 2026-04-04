@@ -107,5 +107,3 @@ function getTransactionHistory(userId = DEFAULT_USER, limit = 50) {
 }
 
 module.exports = { getBalance, getPositions, deposit, withdraw, buy, sell, getTransactionHistory };
-
-module.exports = { getBalance, getPositions, deposit, withdraw, buy, sell, getTransactionHistory };

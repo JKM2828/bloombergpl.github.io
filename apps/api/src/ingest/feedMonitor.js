@@ -10,18 +10,25 @@ const { query, queryOne, run, saveDb } = require('../db/connection');
  * Assess quality of candle data for a given ticker and timeframe.
  * Returns { healthy, issues[], fallbackRecommended, stats }
  */
-function assessFeedQuality(ticker, timeframe = '1d') {
+function assessFeedQuality(ticker, timeframe = '1d', instrType = null) {
   const issues = [];
 
-  const tfClause = timeframe === '1d'
-    ? "(timeframe = '1d' OR timeframe IS NULL)"
-    : timeframe === '5m'
-      ? "timeframe = '5m'"
-      : `timeframe = '${timeframe === '1h' ? '1h' : '1d'}'`;
+  // DATA-M3: Use parameterized queries — whitelist timeframe to prevent SQL injection
+  const VALID_TIMEFRAMES = ['1d', '1h', '5m'];
+  const safeTimeframe = VALID_TIMEFRAMES.includes(timeframe) ? timeframe : '1d';
+
+  let tfParam, tfSql, queryParams;
+  if (safeTimeframe === '1d') {
+    tfSql = "(timeframe = ? OR timeframe IS NULL)";
+    queryParams = [ticker, '1d'];
+  } else {
+    tfSql = "timeframe = ?";
+    queryParams = [ticker, safeTimeframe];
+  }
 
   const candles = query(
-    `SELECT date, open, high, low, close, volume FROM candles WHERE ticker = ? AND ${tfClause} ORDER BY date ASC`,
-    [ticker]
+    `SELECT date, open, high, low, close, volume FROM candles WHERE ticker = ? AND ${tfSql} ORDER BY date ASC`,
+    queryParams
   );
 
   if (candles.length === 0) {
@@ -34,7 +41,7 @@ function assessFeedQuality(ticker, timeframe = '1d') {
   const last = new Date(lastDate);
   const hoursOld = (now - last) / 3600000;
   const dow = now.getDay();
-  const freshThreshold = timeframe === '5m' ? 2 : timeframe === '1h' ? 36 : (dow === 0 || dow === 6 ? 96 : 72);
+  const freshThreshold = safeTimeframe === '5m' ? 2 : safeTimeframe === '1h' ? 36 : (dow === 0 || dow === 6 ? 96 : 72);
   if (hoursOld > freshThreshold) {
     issues.push(`Stale data: ${Math.round(hoursOld)}h old (threshold: ${freshThreshold}h)`);
   }
@@ -55,7 +62,7 @@ function assessFeedQuality(ticker, timeframe = '1d') {
 
   // 4. Gap detection (skipped business days for daily data)
   let gaps = 0;
-  if (timeframe === '1d' && candles.length >= 10) {
+  if (safeTimeframe === '1d' && candles.length >= 10) {
     for (let i = 1; i < Math.min(candles.length, 60); i++) {
       const prev = new Date(candles[candles.length - 1 - i + 1].date);
       const curr = new Date(candles[candles.length - 1 - i].date);
@@ -69,13 +76,15 @@ function assessFeedQuality(ticker, timeframe = '1d') {
   }
 
   // 5. Volume health (all zeros = bad)
+  // DATA-L1: Skip volume check for INDEX and FUTURES (volume=0 is normal for them)
+  const skipVolume = instrType === 'INDEX' || instrType === 'FUTURES';
   const zeroVolBars = candles.slice(-20).filter(c => !c.volume || c.volume === 0).length;
-  if (zeroVolBars > 10) {
+  if (!skipVolume && zeroVolBars > 10) {
     issues.push(`${zeroVolBars}/20 recent bars have zero volume`);
   }
 
   const healthy = issues.length === 0;
-  const fallbackRecommended = !healthy && timeframe === '1h';
+  const fallbackRecommended = !healthy && safeTimeframe === '1h';
 
   return {
     healthy,
@@ -102,8 +111,8 @@ function assessAllFeedQuality() {
   const results = { healthy: 0, degraded: 0, missing: 0, details: [] };
 
   for (const inst of instruments) {
-    const daily = assessFeedQuality(inst.ticker, '1d');
-    const intraday = assessFeedQuality(inst.ticker, '1h');
+    const daily = assessFeedQuality(inst.ticker, '1d', inst.type);
+    const intraday = assessFeedQuality(inst.ticker, '1h', inst.type);
 
     const status = daily.healthy ? 'healthy' : (daily.stats.totalBars > 0 ? 'degraded' : 'missing');
     results[status]++;

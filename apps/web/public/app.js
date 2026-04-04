@@ -142,15 +142,15 @@ async function loadToday() {
     tbody.innerHTML = data.actions.map(a => {
       const actionCls = a.action === 'KUP' ? 'badge-buy' : (a.action === 'TRZYMAJ' ? 'badge-hold' : 'badge-sell');
       return `<tr>
-        <td><strong>${a.ticker}</strong></td>
-        <td>${a.name || '—'}</td>
-        <td>${a.type || '—'}</td>
+        <td><strong>${esc(a.ticker)}</strong></td>
+        <td>${esc(a.name || '—')}</td>
+        <td>${esc(a.type || '—')}</td>
         <td>${a.price != null ? fmt(a.price) : '—'}</td>
-        <td><span class="badge ${actionCls}">${a.action}</span></td>
+        <td><span class="badge ${actionCls}">${esc(a.action)}</span></td>
         <td>${a.confidence != null ? fmt(a.confidence, 1) + '%' : '—'}</td>
         <td class="${pnlClass(a.expectedReturn)}">${a.expectedReturn != null ? fmt(a.expectedReturn, 2) + '%' : '—'}</td>
         <td>${a.rsi != null ? fmt(a.rsi, 1) : '—'}</td>
-        <td style="font-size:0.8em;max-width:300px">${a.reason || '—'}</td>
+        <td style="font-size:0.8em;max-width:300px">${esc(a.reason || '—')}</td>
       </tr>`;
     }).join('');
   } catch (err) {
@@ -203,10 +203,10 @@ async function loadLiveSignals() {
           ${picksData.picks.map(p => `
             <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:10px">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <strong style="font-size:1.1em">${p.ticker}</strong>
+                <strong style="font-size:1.1em">${esc(p.ticker)}</strong>
                 <span class="badge badge-buy">EDGE ${p.edgeScore || '—'}</span>
               </div>
-              <div style="font-size:0.85em;color:var(--text-muted)">${p.name || ''} · ${p.sector || ''}</div>
+              <div style="font-size:0.85em;color:var(--text-muted)">${esc(p.name || '')} · ${esc(p.sector || '')}</div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px;font-size:0.85em">
                 <div>Score: <strong>${fmt(p.compositeScore)}</strong></div>
                 <div>ML: <strong class="positive">${p.ml ? p.ml.confidence + '%' : '—'}</strong></div>
@@ -264,7 +264,7 @@ async function loadTop5() {
     top5El.innerHTML = top5.map((r, i) => `
       <div class="rank-item">
         <span>
-          <span class="ticker">${i + 1}. ${r.ticker}</span> ${r.name}
+          <span class="ticker">${i + 1}. ${esc(r.ticker)}</span> ${esc(r.name)}
           ${(r.lastClose ?? r.metrics?.lastClose) != null ? `<span style="color:var(--text-muted);font-size:0.85em;margin-left:6px">${fmt(r.lastClose ?? r.metrics?.lastClose)} PLN</span>` : ''}
         </span>
         <span class="score positive" title="Score 0-100">${fmt(r.score)} <small style="opacity:0.6">pkt</small></span>
@@ -274,7 +274,7 @@ async function loadTop5() {
     bottom5El.innerHTML = bottom5.map((r, i) => `
       <div class="rank-item">
         <span>
-          <span class="ticker">${r.ticker}</span> ${r.name}
+          <span class="ticker">${esc(r.ticker)}</span> ${esc(r.name)}
           ${(r.lastClose ?? r.metrics?.lastClose) != null ? `<span style="color:var(--text-muted);font-size:0.85em;margin-left:6px">${fmt(r.lastClose ?? r.metrics?.lastClose)} PLN</span>` : ''}
         </span>
         <span class="score negative" title="Score 0-100">${fmt(r.score)} <small style="opacity:0.6">pkt</small></span>
@@ -304,17 +304,17 @@ async function loadSystemStatus() {
       : '';
     document.getElementById('system-status').innerHTML = `
       <div style="font-size:0.9em">
-        <p>Status: <strong style="color:${statusColor}">${data.status.toUpperCase()}</strong></p>
+        <p>Status: <strong style="color:${statusColor}">${esc(data.status).toUpperCase()}</strong></p>
         <p>Instrumenty: <strong>${data.instruments}</strong></p>
         <p>Świece w bazie: <strong>${data.candles.toLocaleString()}</strong></p>
-        <p>Ostatni ingest: <strong>${data.lastIngest || 'brak'}</strong></p>
+        <p>Ostatni ingest: <strong>${esc(data.lastIngest || 'brak')}</strong></p>
         ${freshnessLine}
         ${limitHint}
         <p>Providery:</p>
         ${data.providers.map(p => `
           <p style="margin-left:12px">
             <span class="status-dot ${p.ok ? 'status-ok' : 'status-err'}"></span> ${p.provider} ${p.candles ? `(${p.candles} świec)` : ''}
-            ${p.error ? `<span style="color:var(--red)">${p.error}</span>` : ''}
+            ${p.error ? `<span style="color:var(--red)">${esc(p.error)}</span>` : ''}
           </p>
         `).join('')}
       </div>
@@ -335,7 +335,7 @@ async function loadDashPrediction() {
     }
     document.getElementById('dash-top-prediction').innerHTML = `
       <div style="font-size:0.9em">
-        <p><strong>${pred.ticker}</strong> ${pred.name || ''}</p>
+        <p><strong>${esc(pred.ticker)}</strong> ${esc(pred.name || '')}</p>
         <p>${dirBadge(pred.predicted_direction)} Pewność: <strong>${fmt(pred.confidence * 100)}%</strong></p>
         <p>Oczekiwany zwrot: <strong class="${pnlClass(pred.predicted_return)}">${fmt(pred.predicted_return * 100)}%</strong></p>
         <div class="scenario-bar">
@@ -359,7 +359,7 @@ async function loadDashSignal() {
     }
     document.getElementById('dash-top-signal').innerHTML = `
       <div style="font-size:0.9em">
-        <p><strong>${sig.ticker}</strong> ${sig.name || ''}</p>
+        <p><strong>${esc(sig.ticker)}</strong> ${esc(sig.name || '')}</p>
         <p>${dirBadge(sig.direction)}</p>
         <p>Ryzyko: ${riskBadge(sig.risk_score > 60 ? 'HIGH' : sig.risk_score > 35 ? 'MEDIUM' : 'LOW')} (${sig.risk_score}/100)</p>
         <p>SL: <span class="negative">${fmt(sig.stop_loss)}</span> | TP: <span class="positive">${fmt(sig.take_profit)}</span></p>
@@ -390,12 +390,12 @@ async function loadDashWorker() {
       ? `<span style="color:${ingestAge > 30 ? 'var(--red)' : ingestAge > 10 ? 'var(--yellow)' : 'var(--green)'}">${ingestAge} min temu</span>`
       : '<span style="color:var(--red)">brak</span>';
     const alertBanner = alertData.count > 0
-      ? `<div style="background:${alertData.status === 'critical' ? 'var(--red)' : 'var(--yellow)'};color:${alertData.status === 'critical' ? '#fff' : '#000'};padding:4px 8px;border-radius:4px;margin-top:6px;font-size:0.8em">⚠ ${alertData.count} alert${alertData.count > 1 ? 'y' : ''}: ${alertData.alerts.map(a => a.message).join('; ')}</div>`
+      ? `<div style="background:${alertData.status === 'critical' ? 'var(--red)' : 'var(--yellow)'};color:${alertData.status === 'critical' ? '#fff' : '#000'};padding:4px 8px;border-radius:4px;margin-top:6px;font-size:0.8em">⚠ ${alertData.count} alert${alertData.count > 1 ? 'y' : ''}: ${alertData.alerts.map(a => esc(a.message)).join('; ')}</div>`
       : '';
     document.getElementById('dash-worker-status').innerHTML = `
       <div style="font-size:0.9em">
         <p>Status: <strong style="color:${data.isRunning ? 'var(--green)' : 'var(--red)'}">${data.isRunning ? 'Aktywny' : 'Zatrzymany'}</strong>
-           | Tryb: <strong>${data.currentMode || '—'}</strong></p>
+           | Tryb: <strong>${esc(data.currentMode || '—')}</strong></p>
         <p>Kolejka: <strong>${data.queueSize}</strong> | Przetworzono: <strong>${data.jobsProcessed}</strong> | Błędy: <strong>${data.jobsFailed || 0}</strong></p>
         <p>Ostatni ingest: ${ingestLabel}</p>
         ${runInfo}
@@ -423,14 +423,14 @@ function renderInstrumentsTable(instruments) {
   const tbody = document.querySelector('#instruments-table tbody');
   tbody.innerHTML = instruments.map((inst) => `
     <tr>
-      <td><strong>${inst.ticker}</strong></td>
-      <td>${inst.name}</td>
-      <td>${inst.sector || '—'}</td>
-      <td><span class="filter-btn" style="pointer-events:none;padding:2px 8px;font-size:0.8em">${inst.type}</span></td>
+      <td><strong>${esc(inst.ticker)}</strong></td>
+      <td>${esc(inst.name)}</td>
+      <td>${esc(inst.sector || '—')}</td>
+      <td><span class="filter-btn" style="pointer-events:none;padding:2px 8px;font-size:0.8em">${esc(inst.type)}</span></td>
       <td><strong>${inst.lastClose != null ? fmt(inst.lastClose) + ' <span style="color:var(--text-muted);font-size:0.85em">PLN</span>' : '—'}</strong></td>
       <td>
-        <button class="btn-sm" onclick="showChart('${inst.ticker}')">Chart</button>
-        <button class="btn-sm" onclick="showPrediction('${inst.ticker}')">AI</button>
+        <button class="btn-sm" onclick="showChart('${esc(inst.ticker)}')">Chart</button>
+        <button class="btn-sm" onclick="showPrediction('${esc(inst.ticker)}')">AI</button>
       </td>
     </tr>
   `).join('');
@@ -483,8 +483,8 @@ async function loadPredictions() {
     tbody.innerHTML = predictions.map((p, i) => `
       <tr>
         <td>${i + 1}</td>
-        <td><strong>${p.ticker}</strong> <span style="color:var(--text-muted);font-size:0.75em">${p.type || ''}</span></td>
-        <td>${p.name || ''}</td>
+        <td><strong>${esc(p.ticker)}</strong> <span style="color:var(--text-muted);font-size:0.75em">${esc(p.type || '')}</span></td>
+        <td>${esc(p.name || '')}</td>
         <td><strong>${p.lastClose != null ? fmt(p.lastClose) + ' <span style="color:var(--text-muted);font-size:0.8em">PLN</span>' : '—'}</strong></td>
         <td>${dirBadge(p.predicted_direction)}</td>
         <td>${fmt(p.confidence * 100)}%</td>
@@ -497,7 +497,7 @@ async function loadPredictions() {
         <td class="negative"><strong>${p.targetPriceBear != null ? fmt(p.targetPriceBear) + ' PLN' : '—'}</strong></td>
         <td>${fmt(p.rsi || null)}</td>
         <td class="${pnlClass(p.macd_hist)}">${fmt(p.macd_hist || null, 3)}</td>
-        <td>${p.regime || '—'}</td>
+        <td>${esc(p.regime || '—')}</td>
       </tr>
     `).join('');
   } catch (err) {
@@ -519,7 +519,7 @@ document.getElementById('btn-run-pipeline').addEventListener('click', debounceBt
   el.innerHTML = '<span style="color:var(--yellow)">Uruchamiam pełny pipeline...</span>';
   try {
     const data = await api('/pipeline/run', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">Pipeline gotowy! ${data.jobsProcessed} zadań przetworzonych.</span>`;
+    el.innerHTML = `<span style="color:var(--green)">${esc(data.message || 'Pipeline queued')}</span>`;
     loadPredictions();
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
@@ -566,7 +566,7 @@ async function loadSignals() {
     tbody.innerHTML = signals.map((s, i) => `
       <tr>
         <td>${i + 1}</td>
-        <td><strong>${s.ticker}</strong> <span style="color:var(--text-muted);font-size:0.8em">${s.name || ''}</span></td>
+        <td><strong>${esc(s.ticker)}</strong> <span style="color:var(--text-muted);font-size:0.8em">${esc(s.name || '')}</span></td>
         <td><strong>${s.lastClose != null ? fmt(s.lastClose) + ' <span style="color:var(--text-muted);font-size:0.8em">PLN</span>' : '—'}</strong></td>
         <td>${dirBadge(s.direction)}</td>
         <td>${fmt(s.confidence * 100)}%</td>
@@ -576,8 +576,8 @@ async function loadSignals() {
         <td class="negative">${fmt(s.stop_loss)}</td>
         <td class="positive">${fmt(s.take_profit)}</td>
         <td>${s.hold_days || '—'} dni</td>
-        <td style="font-size:0.75em">${s.model_version || '—'}</td>
-        <td style="font-size:0.75em">${s.created_at || ''}</td>
+        <td style="font-size:0.75em">${esc(s.model_version || '—')}</td>
+        <td style="font-size:0.75em">${esc(s.created_at || '')}</td>
       </tr>
     `).join('');
   } catch (err) {
@@ -606,9 +606,9 @@ async function loadScreener() {
       return `
         <tr>
           <td>${i + 1}</td>
-          <td><strong>${r.ticker}</strong></td>
-          <td>${r.name}</td>
-          <td>${r.type}</td>
+          <td><strong>${esc(r.ticker)}</strong></td>
+          <td>${esc(r.name)}</td>
+          <td>${esc(r.type)}</td>
           <td><strong>${price != null ? fmt(price) + ' <span style="color:var(--text-muted);font-size:0.8em">PLN</span>' : '—'}</strong></td>
           <td><strong class="${pnlClass(r.score - 50)}">${fmt(r.score)}</strong></td>
           <td class="${pnlClass(m.perf1M)}">${fmt(m.perf1M)}%</td>
@@ -616,7 +616,7 @@ async function loadScreener() {
           <td>${fmt(m.rsi)}</td>
           <td>${fmt(m.volatility)}%</td>
           <td class="negative">${fmt(m.maxDrawdown)}%</td>
-          <td style="font-size:0.85em">${r.reason || '—'}</td>
+          <td style="font-size:0.85em">${esc(r.reason || '—')}</td>
         </tr>
       `;
     }).join('');
@@ -1098,12 +1098,12 @@ async function loadWorker() {
       tbody.innerHTML = jobs.map(j => `
         <tr>
           <td>${j.id}</td>
-          <td><strong>${j.job_type}</strong></td>
-          <td class="job-${j.status}">${j.status}</td>
-          <td style="font-size:0.8em">${j.created_at}</td>
-          <td style="font-size:0.8em">${j.finished_at || '—'}</td>
+          <td><strong>${esc(j.job_type)}</strong></td>
+          <td class="job-${esc(j.status)}">${esc(j.status)}</td>
+          <td style="font-size:0.8em">${esc(j.created_at)}</td>
+          <td style="font-size:0.8em">${esc(j.finished_at) || '—'}</td>
           <td>${j.retries}</td>
-          <td style="font-size:0.8em;color:var(--red)">${j.error || ''}</td>
+          <td style="font-size:0.8em;color:var(--red)">${esc(j.error || '')}</td>
         </tr>
       `).join('');
     }
@@ -1139,7 +1139,7 @@ document.getElementById('btn-drain-queue').addEventListener('click', debounceBtn
   el.innerHTML = '<span style="color:var(--yellow)">Przetwarzam kolejkę...</span>';
   try {
     const data = await api('/worker/drain', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">${data.message}</span>`;
+    el.innerHTML = `<span style="color:var(--green)">${esc(data.message)}</span>`;
     loadWorker();
   } catch (err) { el.innerHTML = `<span class="negative">${esc(err.message)}</span>`; }
 }));
@@ -1179,7 +1179,7 @@ async function loadPositions() {
       totalPnl += p.pnl;
       return `
         <tr>
-          <td><strong>${p.ticker}</strong></td>
+          <td><strong>${esc(p.ticker)}</strong></td>
           <td>${p.shares}</td>
           <td>${fmt(p.avgPrice)}</td>
           <td>${fmt(p.currentPrice)}</td>
@@ -1211,9 +1211,9 @@ async function loadTransactions() {
 
     tbody.innerHTML = txns.map((t) => `
       <tr>
-        <td>${t.created_at}</td>
-        <td>${t.type}</td>
-        <td>${t.ticker || '—'}</td>
+        <td>${esc(t.created_at)}</td>
+        <td>${esc(t.type)}</td>
+        <td>${esc(t.ticker || '—')}</td>
         <td>${t.shares || '—'}</td>
         <td>${t.price ? fmt(t.price) : '—'}</td>
         <td>${fmt(t.amount)} PLN</td>
@@ -1298,9 +1298,9 @@ async function loadIngestLogs() {
       : logs.map((l) => `
         <div style="padding:4px 0;border-bottom:1px solid var(--border)">
           <span class="status-dot ${l.status === 'ok' ? 'status-ok' : 'status-err'}"></span>
-          <strong>${l.ticker}</strong> (${l.provider}) – ${l.rows_inserted} nowych
-          <span style="color:var(--text-muted);margin-left:8px">${l.created_at}</span>
-          ${l.status === 'error' ? `<br><span style="color:var(--red)">${l.message}</span>` : ''}
+          <strong>${esc(l.ticker)}</strong> (${esc(l.provider)}) – ${l.rows_inserted} nowych
+          <span style="color:var(--text-muted);margin-left:8px">${esc(l.created_at)}</span>
+          ${l.status === 'error' ? `<br><span style="color:var(--red)">${esc(l.message)}</span>` : ''}
         </div>
       `).join('');
   } catch { /* ignore */ }
@@ -1317,8 +1317,8 @@ async function loadAuditLogs() {
     }
     el.innerHTML = logs.map(l => `
       <div style="padding:4px 0;border-bottom:1px solid var(--border)">
-        <strong>${l.event_type}</strong> [${l.entity}:${l.entity_id}]
-        <span style="color:var(--text-muted);margin-left:8px">${l.created_at}</span>
+        <strong>${esc(l.event_type)}</strong> [${esc(l.entity)}:${esc(l.entity_id)}]
+        <span style="color:var(--text-muted);margin-left:8px">${esc(l.created_at)}</span>
       </div>
     `).join('');
   } catch { /* ignore */ }
@@ -1460,9 +1460,9 @@ async function loadCompetitionDecision() {
         const a = p.allocation || {};
         return `<tr${p.rank === 1 ? ' style="background:rgba(63,185,80,0.08)"' : ''}>
           <td><strong>${p.rank === 1 ? '★ ' : ''}${p.rank}</strong></td>
-          <td><strong>${p.ticker}</strong></td>
-          <td>${p.name || '—'}</td>
-          <td>${p.type}</td>
+          <td><strong>${esc(p.ticker)}</strong></td>
+          <td>${esc(p.name || '—')}</td>
+          <td>${esc(p.type)}</td>
           <td><strong>${fmt(p.compositeScore)}</strong></td>
           <td>${p.edgeScore || '—'}</td>
           <td class="positive">${p.ml ? p.ml.confidence + '%' : '—'}</td>

@@ -20,8 +20,8 @@ const { getSector, getSectorPeers } = require('../data/sectors');
 // QUALITY GATES – pick must pass ALL to be published
 // ============================================================
 const QUALITY_GATES = {
-  minConfidence: 0.35,        // ML confidence threshold
-  minExpectedReturn: 0.005,   // >0.5% expected return
+  minConfidence: 0.45,        // ML confidence threshold (DATA-M2: raised from 0.35)
+  minExpectedReturn: 0.01,    // >1.0% expected return (DATA-M2: raised from 0.5%)
   minLiquidityScore: 0.3,     // execution score threshold
   minCompositeScore: 30,      // overall composite score
   maxConcurrentPicks: 5,      // hard cap on published signals

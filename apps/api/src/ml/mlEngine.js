@@ -125,13 +125,16 @@ function trainForTicker(ticker, opts = {}) {
 
 /**
  * Train models for all instruments with enough data.
+ * PERF-H1: async to yield event loop between tickers (setImmediate)
  */
-function trainAll(opts = {}) {
+async function trainAll(opts = {}) {
   const instruments = query("SELECT ticker FROM instruments WHERE active = 1 AND type IN ('STOCK','ETF','INDEX','FUTURES')");
   const results = [];
   for (const inst of instruments) {
     const result = trainForTicker(inst.ticker, opts);
     if (result) results.push(result);
+    // Yield to event loop after each ticker to keep API/WS responsive
+    await new Promise(r => setImmediate(r));
   }
   currentModelVersion = MODEL_VERSION_PREFIX + Date.now();
   console.log(`[ml] Training complete: ${results.length} models trained`);
