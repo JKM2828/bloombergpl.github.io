@@ -6,7 +6,11 @@ const API = (window.location.hostname === 'localhost' || window.location.hostnam
   ? 'http://localhost:3001/api'
   : '/api';
 
-const PROD_WS_ORIGIN = 'wss://bloomberpl-da6e13c64b4e.herokuapp.com';
+// WebSocket origin: on localhost connect directly, on Vercel connect to Heroku backend
+// (Vercel rewrites only work for HTTP, not WebSocket)
+const PROD_WS_ORIGIN = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'ws://localhost:3001'
+  : 'wss://bloomberpl-da6e13c64b4e.herokuapp.com';
 
 // ---- Navigation ----
 document.querySelectorAll('.nav-btn').forEach((btn) => {
@@ -167,9 +171,57 @@ async function loadDashboard() {
   loadTop5();
   loadLiveSignals();
   loadSystemStatus();
+  loadMlFreshness();
   loadDashPrediction();
   loadDashSignal();
   loadDashWorker();
+}
+
+async function loadMlFreshness() {
+  const el = document.getElementById('freshness-content');
+  if (!el) return;
+  try {
+    const [statusRes, freshnessRes] = await Promise.allSettled([
+      api('/ml/status'),
+      apiCached('/freshness', 30000),
+    ]);
+    const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
+    const freshness = freshnessRes.status === 'fulfilled' ? freshnessRes.value : null;
+
+    if (!status && !freshness) {
+      el.innerHTML = '<span style="color:var(--red)">Nie można pobrać statusu ML.</span>';
+      return;
+    }
+
+    const parts = [];
+    if (freshness) {
+      const staleColor = freshness.stale > 5 ? 'var(--red)' : freshness.stale > 0 ? 'var(--yellow)' : 'var(--green)';
+      parts.push(`<span>Świeże instrumenty: <strong>${freshness.fresh}/${freshness.total}</strong> | <span style="color:${staleColor}">Nieaktualne: <strong>${freshness.stale}</strong></span></span>`);
+    }
+    if (status) {
+      const tickers = status.tickers || [];
+      const total = tickers.length;
+      const trained = tickers.filter(t => t.hasModel).length;
+      const predicted = tickers.filter(t => t.hasPrediction).length;
+      const trainable = tickers.filter(t => t.trainable).length;
+      const trainPct = total > 0 ? Math.round(trained / total * 100) : 0;
+      const predPct = total > 0 ? Math.round(predicted / total * 100) : 0;
+      const trainColor = trainPct >= 80 ? 'var(--green)' : trainPct >= 50 ? 'var(--yellow)' : 'var(--red)';
+      const predColor = predPct >= 80 ? 'var(--green)' : predPct >= 50 ? 'var(--yellow)' : 'var(--red)';
+
+      parts.push(`<span>Modele: <strong style="color:${trainColor}">${trained}/${total}</strong> (${trainPct}%) | Predykcje: <strong style="color:${predColor}">${predicted}/${total}</strong> (${predPct}%) | Gotowych do treningu: <strong>${trainable}</strong></span>`);
+
+      // Show tickers without models
+      const noModel = tickers.filter(t => !t.hasModel);
+      if (noModel.length > 0 && noModel.length <= 20) {
+        parts.push(`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--yellow)">⚠ Bez modelu (${noModel.length})</summary><div style="margin-top:4px;font-size:0.85em">${noModel.map(t => `${esc(t.ticker)}: ${t.candleCount} świec, ${t.featureCount} cech`).join(' | ')}</div></details>`);
+      }
+    }
+
+    el.innerHTML = parts.join('<br>') || 'Brak danych';
+  } catch {
+    el.innerHTML = '<span style="color:var(--text-muted)">Nie można pobrać statusu ML.</span>';
+  }
 }
 
 async function loadLiveSignals() {
@@ -516,11 +568,14 @@ function showPrediction(ticker) {
 // Prediction action buttons
 document.getElementById('btn-run-pipeline').addEventListener('click', debounceBtn(document.getElementById('btn-run-pipeline'), async () => {
   const el = document.getElementById('prediction-status');
-  el.innerHTML = '<span style="color:var(--yellow)">Uruchamiam pełny pipeline...</span>';
+  el.innerHTML = '<span style="color:var(--yellow)">⏳ Uruchamiam pełny pipeline (ingest → features → train → predykcje → ranking)...</span>';
   try {
     const data = await api('/pipeline/run', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">${esc(data.message || 'Pipeline queued')}</span>`;
-    loadPredictions();
+    el.innerHTML = `<span style="color:var(--green)">✅ ${esc(data.message || 'Pipeline queued')} — dane odświeżą się automatycznie.</span>`;
+    // Poll for completion and refresh
+    setTimeout(() => { loadPredictions(); loadDashboard(); }, 5000);
+    setTimeout(() => { loadPredictions(); loadDashboard(); }, 15000);
+    setTimeout(() => { loadPredictions(); loadDashboard(); }, 30000);
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
   }
@@ -528,11 +583,12 @@ document.getElementById('btn-run-pipeline').addEventListener('click', debounceBt
 
 document.getElementById('btn-run-predictions').addEventListener('click', debounceBtn(document.getElementById('btn-run-predictions'), async () => {
   const el = document.getElementById('prediction-status');
-  el.innerHTML = '<span style="color:var(--yellow)">Generuję predykcje...</span>';
+  el.innerHTML = '<span style="color:var(--yellow)">⏳ Generuję predykcje...</span>';
   try {
     const data = await api('/predictions/run', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">${data.predictionsCount} predykcji, ${data.signalsCount} sygnałów.</span>`;
+    el.innerHTML = `<span style="color:var(--green)">✅ ${data.predictionsCount} predykcji, ${data.signalsCount} sygnałów.</span>`;
     loadPredictions();
+    loadDashboard();
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
@@ -540,10 +596,16 @@ document.getElementById('btn-run-predictions').addEventListener('click', debounc
 
 document.getElementById('btn-train-models').addEventListener('click', debounceBtn(document.getElementById('btn-train-models'), async () => {
   const el = document.getElementById('prediction-status');
-  el.innerHTML = '<span style="color:var(--yellow)">Trenuję modele neuronowe... to może potrwać.</span>';
+  el.innerHTML = '<span style="color:var(--yellow)">⏳ Trenuję modele + synchronizuję predykcje i ranking... to może potrwać.</span>';
   try {
-    const data = await api('/ml/train', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">Wytrenowano ${data.models} modeli.</span>`;
+    const data = await api('/ml/train', { method: 'POST', timeout: 120000 });
+    const skippedCount = data.skippedTickers ? data.skippedTickers.length : 0;
+    el.innerHTML = `<span style="color:var(--green)">✅ Wytrenowano ${data.models} modeli → ${data.predictions || 0} predykcji → ${data.ranked || 0} w rankingu.`
+      + (skippedCount > 0 ? ` <span style="color:var(--yellow)">(${skippedCount} pominiętych — za mało danych)</span>` : '')
+      + `</span>`;
+    // Auto-refresh all views with fresh data
+    loadPredictions();
+    loadDashboard();
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
@@ -1535,14 +1597,14 @@ async function loadCompetitionPortfolio() {
     }
     tbody.innerHTML = data.positions.map(p => `
       <tr>
-        <td><strong>${p.ticker}</strong></td>
+        <td><strong>${esc(p.ticker)}</strong></td>
         <td>${p.shares}</td>
         <td>${fmt(p.entry_price)}</td>
         <td>${fmt(p.currentPrice)}</td>
         <td>${fmt(p.marketValue)}</td>
         <td class="${pnlClass(p.pnlPct)}"><strong>${fmt(p.pnlPct)}%</strong></td>
         <td>${p.entry_date || '—'}</td>
-        <td><button class="btn-sm btn-danger" onclick="compSellPosition(${p.id}, '${p.ticker}', ${p.currentPrice})">Sprzedaj</button></td>
+        <td><button class="btn-sm btn-danger" onclick="compSellPosition(${Number(p.id)}, '${esc(p.ticker)}', ${Number(p.currentPrice)})">Sprzedaj</button></td>
       </tr>
     `).join('');
   } catch {
@@ -1563,14 +1625,14 @@ async function loadCompetitionSellCandidates() {
       const actionCls = c.action === 'SELL' ? 'badge-sell' : c.action === 'PARTIAL_SELL' ? 'badge-hold' : 'badge-hold';
       const actionLabel = c.action === 'SELL' ? 'SPRZEDAJ' : c.action === 'PARTIAL_SELL' ? 'CZĘŚCIOWO' : 'ROZWAŻ';
       return `<tr>
-        <td><strong>${c.ticker}</strong></td>
+        <td><strong>${esc(c.ticker)}</strong></td>
         <td>${c.shares}</td>
         <td>${fmt(c.entryPrice)}</td>
         <td>${fmt(c.currentPrice)}</td>
         <td class="${pnlClass(c.pnlPct)}"><strong>${fmt(c.pnlPct)}%</strong></td>
         <td>${c.daysHeld}d</td>
         <td><span class="badge ${actionCls}">${actionLabel}</span></td>
-        <td style="font-size:0.8em">${c.sellReasons.join('; ')}</td>
+        <td style="font-size:0.8em">${esc(c.sellReasons.join('; '))}</td>
       </tr>`;
     }).join('');
   } catch {
@@ -1599,7 +1661,7 @@ async function loadCompetitionHistory() {
     tbody.innerHTML = closed.map(t => {
       const pnlPct = t.entry_price > 0 ? ((t.exit_price - t.entry_price) / t.entry_price * 100) : 0;
       return `<tr>
-        <td><strong>${t.ticker}</strong></td>
+        <td><strong>${esc(t.ticker)}</strong></td>
         <td>${t.shares}</td>
         <td>${fmt(t.entry_price)}</td>
         <td>${fmt(t.exit_price)}</td>

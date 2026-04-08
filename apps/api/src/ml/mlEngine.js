@@ -128,16 +128,27 @@ function trainForTicker(ticker, opts = {}) {
  * PERF-H1: async to yield event loop between tickers (setImmediate)
  */
 async function trainAll(opts = {}) {
-  const instruments = query("SELECT ticker FROM instruments WHERE active = 1 AND type IN ('STOCK','ETF','INDEX','FUTURES')");
+  const instruments = query("SELECT ticker, type FROM instruments WHERE active = 1 AND type IN ('STOCK','ETF','INDEX','FUTURES')");
   const results = [];
+  const skipped = [];
   for (const inst of instruments) {
     const result = trainForTicker(inst.ticker, opts);
-    if (result) results.push(result);
+    if (result) {
+      results.push(result);
+    } else {
+      // Collect diagnostic info for skipped tickers
+      const candleCount = (queryOne('SELECT COUNT(*) as n FROM candles WHERE ticker = ?', [inst.ticker]) || {}).n || 0;
+      const featureCount = (queryOne('SELECT COUNT(*) as n FROM features WHERE ticker = ?', [inst.ticker]) || {}).n || 0;
+      skipped.push({ ticker: inst.ticker, type: inst.type, candles: candleCount, features: featureCount });
+    }
     // Yield to event loop after each ticker to keep API/WS responsive
     await new Promise(r => setImmediate(r));
   }
   currentModelVersion = MODEL_VERSION_PREFIX + Date.now();
-  console.log(`[ml] Training complete: ${results.length} models trained`);
+  console.log(`[ml] Training complete: ${results.length}/${instruments.length} models trained, ${skipped.length} skipped`);
+  if (skipped.length > 0) {
+    console.log(`[ml] Skipped tickers: ${skipped.map(s => `${s.ticker}(c:${s.candles},f:${s.features})`).join(', ')}`);
+  }
   return results;
 }
 

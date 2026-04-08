@@ -204,3 +204,97 @@ describe('input validation contracts', () => {
     assert.equal(normalize('CDR'), 'CDR');
   });
 });
+
+// ---- Portfolio endpoints require auth ----
+describe('portfolio endpoints require requireAdmin', () => {
+  it('POST /portfolio/deposit is guarded by requireAdmin', () => {
+    // Read the route source and verify requireAdmin is in the handler chain
+    const fs = require('fs');
+    const path = require('path');
+    const routeSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'src', 'routes', 'index.js'),
+      'utf8'
+    );
+    assert.ok(
+      routeSrc.includes("router.post('/portfolio/deposit', requireAdmin"),
+      'POST /portfolio/deposit must use requireAdmin middleware'
+    );
+  });
+
+  it('POST /portfolio/withdraw is guarded by requireAdmin', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const routeSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'src', 'routes', 'index.js'),
+      'utf8'
+    );
+    assert.ok(
+      routeSrc.includes("router.post('/portfolio/withdraw', requireAdmin"),
+      'POST /portfolio/withdraw must use requireAdmin middleware'
+    );
+  });
+
+  it('POST /portfolio/buy is guarded by requireAdmin', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const routeSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'src', 'routes', 'index.js'),
+      'utf8'
+    );
+    assert.ok(
+      routeSrc.includes("router.post('/portfolio/buy', requireAdmin"),
+      'POST /portfolio/buy must use requireAdmin middleware'
+    );
+  });
+
+  it('POST /portfolio/sell is guarded by requireAdmin', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const routeSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'src', 'routes', 'index.js'),
+      'utf8'
+    );
+    assert.ok(
+      routeSrc.includes("router.post('/portfolio/sell', requireAdmin"),
+      'POST /portfolio/sell must use requireAdmin middleware'
+    );
+  });
+});
+
+// ---- XSS: competition onclick uses esc() ----
+describe('XSS: competition sell button escaping', () => {
+  it('compSellPosition onclick uses esc() for ticker', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const appSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', '..', 'web', 'public', 'app.js'),
+      'utf8'
+    );
+    // Must NOT have unescaped p.ticker in onclick
+    assert.ok(
+      !appSrc.includes("'${p.ticker}'"),
+      'onclick must not use raw p.ticker — use esc(p.ticker)'
+    );
+    assert.ok(
+      appSrc.includes("esc(p.ticker)"),
+      'onclick must use esc(p.ticker) for XSS safety'
+    );
+  });
+
+  it('sell candidates table uses esc() for ticker and reasons', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const appSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', '..', 'web', 'public', 'app.js'),
+      'utf8'
+    );
+    assert.ok(
+      appSrc.includes("esc(c.ticker)"),
+      'sell candidates table must escape c.ticker'
+    );
+    assert.ok(
+      appSrc.includes("esc(c.sellReasons"),
+      'sell candidates table must escape c.sellReasons'
+    );
+  });
+});

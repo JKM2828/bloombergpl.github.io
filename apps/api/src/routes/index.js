@@ -531,7 +531,7 @@ router.get('/portfolio/transactions', (req, res) => {
   res.json({ transactions: portfolio.getTransactionHistory('default', limit) });
 });
 
-router.post('/portfolio/deposit', (req, res) => {
+router.post('/portfolio/deposit', requireAdmin, (req, res) => {
   try {
     const { amount } = req.body;
     const result = portfolio.deposit(parseFloat(amount));
@@ -541,7 +541,7 @@ router.post('/portfolio/deposit', (req, res) => {
   }
 });
 
-router.post('/portfolio/withdraw', (req, res) => {
+router.post('/portfolio/withdraw', requireAdmin, (req, res) => {
   try {
     const { amount } = req.body;
     const result = portfolio.withdraw(parseFloat(amount));
@@ -551,7 +551,7 @@ router.post('/portfolio/withdraw', (req, res) => {
   }
 });
 
-router.post('/portfolio/buy', (req, res) => {
+router.post('/portfolio/buy', requireAdmin, (req, res) => {
   try {
     const { ticker, shares } = req.body;
     const result = portfolio.buy(ticker.toUpperCase(), parseFloat(shares));
@@ -561,7 +561,7 @@ router.post('/portfolio/buy', (req, res) => {
   }
 });
 
-router.post('/portfolio/sell', (req, res) => {
+router.post('/portfolio/sell', requireAdmin, (req, res) => {
   try {
     const { ticker, shares } = req.body;
     const result = portfolio.sell(ticker.toUpperCase(), parseFloat(shares));
@@ -688,12 +688,62 @@ router.get('/signals', (req, res) => {
 });
 
 // ============================================================
-// ML Training
+// ML Training (synchronized: features → train → predict → signals → screener)
 // ============================================================
 router.post('/ml/train', requireAdmin, async (req, res) => {
   try {
+    const sync = req.query.sync !== '0'; // default: full sync pipeline
+    const steps = { features: 0, models: 0, predictions: 0, signals: 0, ranked: 0, skipped: [] };
+
+    // Step 1: Recompute features from latest candles
+    if (sync) {
+      steps.features = computeAllFeatures({ force: false });
+      console.log(`[ml/train] Features computed: ${steps.features}`);
+    }
+
+    // Step 2: Train all models
     const results = await trainAll(req.body || {});
-    res.json({ message: 'Training complete', models: results.length, results });
+    steps.models = results.length;
+
+    // Collect tickers that were skipped (insufficient data)
+    const allInstruments = query("SELECT ticker, type FROM instruments WHERE active = 1 AND type IN ('STOCK','ETF','INDEX','FUTURES')");
+    const trainedTickers = new Set(results.map(r => r.ticker));
+    steps.skipped = allInstruments
+      .filter(i => !trainedTickers.has(i.ticker))
+      .map(i => {
+        const candleCount = (queryOne('SELECT COUNT(*) as n FROM candles WHERE ticker = ?', [i.ticker]) || {}).n || 0;
+        const featureCount = (queryOne('SELECT COUNT(*) as n FROM features WHERE ticker = ?', [i.ticker]) || {}).n || 0;
+        return { ticker: i.ticker, type: i.type, candles: candleCount, features: featureCount, reason: featureCount < 20 ? 'za mało features' : 'za mało próbek treningowych' };
+      });
+
+    // Step 3: Generate fresh predictions & signals from newly trained models
+    if (sync) {
+      const predictions = predictAll(req.body?.horizonDays || 5);
+      steps.predictions = predictions.length;
+      const signals = generateAllSignals(predictions);
+      steps.signals = signals.length;
+      console.log(`[ml/train] Predictions: ${predictions.length}, Signals: ${signals.length}`);
+
+      // Step 4: Refresh screener/ranking with new predictions
+      const rankings = runScreener();
+      steps.ranked = rankings.length;
+      const picksData = getDailyPicks();
+      if (picksData.picks.length > 0) saveDailyPicks(picksData.picks);
+      console.log(`[ml/train] Ranking: ${rankings.length}, Picks: ${picksData.picks.length}`);
+    }
+
+    res.json({
+      message: sync
+        ? `Pipeline zsynchronizowany: ${steps.models} modeli → ${steps.predictions} predykcji → ${steps.ranked} w rankingu`
+        : `Wytrenowano ${steps.models} modeli (bez synchronizacji)`,
+      models: steps.models,
+      predictions: steps.predictions,
+      signals: steps.signals,
+      ranked: steps.ranked,
+      featuresComputed: steps.features,
+      skippedTickers: steps.skipped,
+      results,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -721,6 +771,59 @@ router.get('/ml/models', (req, res) => {
     "SELECT * FROM model_registry WHERE status = 'active' ORDER BY created_at DESC LIMIT 50"
   );
   res.json({ count: models.length, models });
+});
+
+// ============================================================
+// ML Status — diagnostic endpoint for data coverage per ticker
+// ============================================================
+router.get('/ml/status', (req, res) => {
+  const instruments = query("SELECT ticker, type, name FROM instruments WHERE active = 1 ORDER BY type, ticker");
+  const tickers = instruments.map(i => {
+    const candleRow = queryOne('SELECT COUNT(*) as n, MAX(date) as lastDate FROM candles WHERE ticker = ?', [i.ticker]);
+    const featureRow = queryOne('SELECT COUNT(*) as n, MAX(date) as lastDate FROM features WHERE ticker = ?', [i.ticker]);
+    const modelRow = queryOne("SELECT version, accuracy, training_samples, created_at FROM model_registry WHERE model_name = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1", [i.ticker]);
+    const predRow = queryOne('SELECT predicted_direction, confidence, created_at FROM predictions WHERE ticker = ? ORDER BY created_at DESC LIMIT 1', [i.ticker]);
+
+    const candles = candleRow?.n || 0;
+    const features = featureRow?.n || 0;
+    const minSamples = (i.type === 'FUTURES' || i.type === 'INDEX') ? 8 : 20;
+    const trainable = features >= minSamples;
+
+    return {
+      ticker: i.ticker,
+      type: i.type,
+      name: i.name,
+      candles,
+      candlesLastDate: candleRow?.lastDate || null,
+      features,
+      featuresLastDate: featureRow?.lastDate || null,
+      trainable,
+      minSamples,
+      model: modelRow ? {
+        version: modelRow.version,
+        accuracy: modelRow.accuracy,
+        samples: modelRow.training_samples,
+        trainedAt: modelRow.created_at,
+      } : null,
+      prediction: predRow ? {
+        direction: predRow.predicted_direction,
+        confidence: predRow.confidence,
+        createdAt: predRow.created_at,
+      } : null,
+    };
+  });
+
+  const summary = {
+    total: tickers.length,
+    withCandles: tickers.filter(t => t.candles > 0).length,
+    withFeatures: tickers.filter(t => t.features > 0).length,
+    trainable: tickers.filter(t => t.trainable).length,
+    withModel: tickers.filter(t => t.model).length,
+    withPrediction: tickers.filter(t => t.prediction).length,
+    notTrainable: tickers.filter(t => !t.trainable).map(t => ({ ticker: t.ticker, candles: t.candles, features: t.features, minSamples: t.minSamples })),
+  };
+
+  res.json({ summary, tickers });
 });
 
 // ============================================================

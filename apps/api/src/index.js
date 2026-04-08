@@ -39,6 +39,9 @@ app.use(helmet({
 const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
   : null; // null = allow all (dev mode)
+if (!ALLOWED_ORIGINS && process.env.NODE_ENV === 'production') {
+  console.warn('[SECURITY] CORS_ORIGINS not set in production — all origins allowed. Set CORS_ORIGINS env var.');
+}
 app.use(cors({
   origin: ALLOWED_ORIGINS || '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -68,6 +71,7 @@ const costlyPaths = [
   '/api/pipeline/run', '/api/ml/train', '/api/ml/backtest', '/api/ml/features',
   '/api/ingest/full', '/api/ingest/incremental', '/api/ingest/intraday', '/api/ingest/intraday5m',
   '/api/predictions/run', '/api/ranking/run', '/api/worker/drain', '/api/worker/enqueue',
+  '/api/portfolio/deposit', '/api/portfolio/withdraw', '/api/portfolio/buy', '/api/portfolio/sell',
 ];
 costlyPaths.forEach(p => app.use(p, costlyLimiter));
 
