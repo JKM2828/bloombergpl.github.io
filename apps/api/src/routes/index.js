@@ -587,11 +587,13 @@ router.get('/health', async (req, res) => {
   const pendingJobs = (queryOne("SELECT COUNT(*) as cnt FROM jobs WHERE status = 'pending'") || {}).cnt || 0;
   const runningJobs = (queryOne("SELECT COUNT(*) as cnt FROM jobs WHERE status = 'running'") || {}).cnt || 0;
 
-  const allOk = providers.every(p => p.ok);
-  const anyOk = providers.some(p => p.ok);
-  const anyRateLimited = providers.some(p => p.rateLimited);
-  const allRateLimited = providers.every(p => p.rateLimited || !p.ok);
-  // If at least one provider works → ok or degraded; all down/limited → rate_limited or down
+  // Optional-disabled providers (e.g. EODHD without API key) should not degrade overall status
+  const isOptionalDisabled = (p) => p.provider === 'eodhd' && typeof p.error === 'string' && p.error.includes('No API key');
+  const requiredProviders = providers.filter(p => !isOptionalDisabled(p));
+  const allOk = requiredProviders.length === 0 || requiredProviders.every(p => p.ok);
+  const anyOk = requiredProviders.some(p => p.ok);
+  const anyRateLimited = requiredProviders.some(p => p.rateLimited);
+  // If at least one required provider works → ok or degraded; all down/limited → rate_limited or down
   const providerStatus = allOk ? 'ok' : anyOk ? 'degraded' : anyRateLimited ? 'rate_limited' : 'down';
 
   // Data freshness: check how many tickers have recent data (< 3 days)
@@ -613,18 +615,21 @@ router.get('/health', async (req, res) => {
     : (dataStale && staleCount === instrumentCount) ? 'degraded'
     : providerStatus;
 
+  const worker = getWorkerStatus();
+  const freshnessFull = staleCount <= 0;
+
   // Recovery blockers: list what is preventing the system from recovering
+  // Suppress informational items when system is fully healthy
   const recoveryBlockers = [];
-  if (providers.some(p => p.error && p.error.includes('No API key'))) {
+  if (providers.some(p => isOptionalDisabled(p)) && !(freshnessFull && worker.isRunning && dbOk)) {
     recoveryBlockers.push('EODHD_API_KEY not configured (optional provider disabled)');
   }
   if (lastCycle?.budgetExhausted) {
     recoveryBlockers.push('HTTP budget exhausted in last ingest cycle');
   }
-  if (lastCycle?.batchPartial) {
+  if (lastCycle?.batchPartial && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
     recoveryBlockers.push(`Batch partial: ${lastCycle.batchHits}/${lastCycle.tickers} tickers from Stooq JSON`);
   }
-  const worker = getWorkerStatus();
   if (!worker.isRunning) {
     recoveryBlockers.push('Worker scheduler is not running');
   }

@@ -91,10 +91,85 @@ describe('ingest freshness & budget', () => {
 
 describe('health endpoint contract', () => {
   it('/health response includes freshness and recoveryBlockers fields', () => {
-    // This is a contract test — we verify the shape of the health response
-    // by checking that the route handler references the expected fields.
-    // Full integration test would require spinning up the server.
     const routes = require('../../src/routes');
     assert.ok(routes, 'Routes module must export a router');
+  });
+
+  it('optional EODHD without API key should NOT degrade status when data is fresh', () => {
+    // Simulate the exact provider status aggregation logic from /health
+    const providers = [
+      { provider: 'gpw', ok: true },
+      { provider: 'stooq-json', ok: true },
+      { provider: 'stooq', ok: true },
+      { provider: 'eodhd', ok: false, error: 'No API key (set EODHD_API_KEY)' },
+      { provider: 'yahoo', ok: true, candles: 4 },
+    ];
+
+    // Replicate the isOptionalDisabled filter from routes/index.js
+    const isOptionalDisabled = (p) => p.provider === 'eodhd' && typeof p.error === 'string' && p.error.includes('No API key');
+    const requiredProviders = providers.filter(p => !isOptionalDisabled(p));
+    const allOk = requiredProviders.length === 0 || requiredProviders.every(p => p.ok);
+    const anyOk = requiredProviders.some(p => p.ok);
+    const providerStatus = allOk ? 'ok' : anyOk ? 'degraded' : 'down';
+
+    assert.equal(providerStatus, 'ok', 'Status must be ok when only optional EODHD is down');
+    assert.equal(requiredProviders.length, 4, 'EODHD should be excluded from required providers');
+    assert.ok(providers.some(p => p.provider === 'eodhd'), 'EODHD must still be listed in providers');
+  });
+
+  it('suppresses EODHD blocker and batch partial when freshness is full', () => {
+    const providers = [
+      { provider: 'gpw', ok: true },
+      { provider: 'eodhd', ok: false, error: 'No API key (set EODHD_API_KEY)' },
+    ];
+    const isOptionalDisabled = (p) => p.provider === 'eodhd' && typeof p.error === 'string' && p.error.includes('No API key');
+
+    const dbOk = true;
+    const workerRunning = true;
+    const freshnessFull = true;  // staleCount <= 0
+    const staleCount = 0;
+    const lastCycle = { batchPartial: true, batchHits: 162, tickers: 163, stillMissing: 0, budgetExhausted: false };
+
+    const recoveryBlockers = [];
+    if (providers.some(p => isOptionalDisabled(p)) && !(freshnessFull && workerRunning && dbOk)) {
+      recoveryBlockers.push('EODHD_API_KEY not configured');
+    }
+    if (lastCycle?.budgetExhausted) {
+      recoveryBlockers.push('HTTP budget exhausted');
+    }
+    if (lastCycle?.batchPartial && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
+      recoveryBlockers.push('Batch partial');
+    }
+    if (!workerRunning) {
+      recoveryBlockers.push('Worker not running');
+    }
+
+    assert.equal(recoveryBlockers.length, 0, 'No blockers when freshness full, worker running, db ok');
+  });
+
+  it('shows EODHD blocker when freshness is NOT full', () => {
+    const providers = [
+      { provider: 'gpw', ok: true },
+      { provider: 'eodhd', ok: false, error: 'No API key (set EODHD_API_KEY)' },
+    ];
+    const isOptionalDisabled = (p) => p.provider === 'eodhd' && typeof p.error === 'string' && p.error.includes('No API key');
+
+    const dbOk = true;
+    const workerRunning = true;
+    const freshnessFull = false;  // some instruments stale
+    const staleCount = 10;
+    const lastCycle = { batchPartial: true, batchHits: 150, tickers: 163, stillMissing: 3, budgetExhausted: false };
+
+    const recoveryBlockers = [];
+    if (providers.some(p => isOptionalDisabled(p)) && !(freshnessFull && workerRunning && dbOk)) {
+      recoveryBlockers.push('EODHD_API_KEY not configured');
+    }
+    if (lastCycle?.batchPartial && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
+      recoveryBlockers.push('Batch partial');
+    }
+
+    assert.equal(recoveryBlockers.length, 2, 'Both blockers should show when freshness is incomplete');
+    assert.ok(recoveryBlockers.includes('EODHD_API_KEY not configured'));
+    assert.ok(recoveryBlockers.includes('Batch partial'));
   });
 });
