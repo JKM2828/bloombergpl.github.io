@@ -53,6 +53,10 @@ const API_TIMEOUT_MS = 30000;
 const API_MAX_RETRIES = 3;
 const API_RETRY_BASE_MS = 500;
 
+// Admin API key — persisted in localStorage
+function getAdminKey() { return (localStorage.getItem('gpw_admin_key') || '').trim(); }
+function setAdminKey(k) { localStorage.setItem('gpw_admin_key', (k || '').trim()); }
+
 async function api(path, options = {}) {
   const maxRetries = options.retries ?? API_MAX_RETRIES;
   let lastErr;
@@ -64,8 +68,11 @@ async function api(path, options = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
     try {
+      const hdrs = { 'Content-Type': 'application/json' };
+      const key = getAdminKey();
+      if (key) hdrs['X-API-Key'] = key;
       const res = await fetch(API + path, {
-        headers: { 'Content-Type': 'application/json' },
+        headers: hdrs,
         signal: controller.signal,
         ...options,
       });
@@ -584,6 +591,21 @@ function showPrediction(ticker) {
   document.getElementById('view-predictions').classList.add('active');
   loadPredictions();
 }
+
+// Admin API key — save/load from localStorage
+(function initAdminKey() {
+  const inp = document.getElementById('admin-key-input');
+  const saved = getAdminKey();
+  if (saved && inp) inp.value = saved;
+  const btn = document.getElementById('btn-save-key');
+  if (btn) btn.addEventListener('click', () => {
+    setAdminKey(inp.value);
+    const st = document.getElementById('prediction-status');
+    if (st) st.innerHTML = inp.value
+      ? '<span style="color:var(--green)">🔑 Klucz zapisany.</span>'
+      : '<span style="color:var(--yellow)">🔑 Klucz usunięty.</span>';
+  });
+})();
 
 // Prediction action buttons
 document.getElementById('btn-run-pipeline').addEventListener('click', debounceBtn(document.getElementById('btn-run-pipeline'), async () => {
