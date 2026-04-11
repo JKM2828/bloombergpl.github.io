@@ -371,13 +371,23 @@ async function loadSystemStatus() {
         ${freshnessLine}
         ${limitHint}
         ${blockersHtml}
+        ${data.alerts && data.alerts.length > 0 ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--red)">🚨 Alerty (${data.alerts.length})</summary><ul style="margin:4px 0 0 16px;font-size:0.85em">${data.alerts.map(a => `<li style="color:${a.level === 'critical' ? 'var(--red)' : 'var(--yellow)'}">${esc(a.message)}</li>`).join('')}</ul></details>` : ''}
         <p>Providery:</p>
-        ${data.providers.map(p => `
-          <p style="margin-left:12px">
-            <span class="status-dot ${p.ok ? 'status-ok' : 'status-err'}"></span> ${p.provider} ${p.candles ? `(${p.candles} świec)` : ''}
-            ${p.error ? `<span style="color:var(--red)">${esc(p.error)}</span>` : ''}
-          </p>
-        `).join('')}
+        ${data.providers.map(p => {
+          const statusLabel = p.status === 'optional_disabled' ? '(wyłączony)'
+            : p.status === 'rate_limited' ? '(limit)'
+            : p.status === 'circuit_open' ? '(przerwa)'
+            : p.status === 'cached' ? '(cache)'
+            : p.status === 'down' ? '(niedostępny)'
+            : '';
+          const statusColor = p.status === 'ok' || p.status === 'cached' ? '' : 'color:var(--yellow)';
+          return `<p style="margin-left:12px">
+            <span class="status-dot ${p.ok ? 'status-ok' : 'status-err'}"></span> ${esc(p.provider)}
+            ${statusLabel ? `<span style="${statusColor};font-size:0.85em"> ${statusLabel}</span>` : ''}
+            ${p.candles ? `<span style="font-size:0.85em"> (${p.candles} świec)</span>` : ''}
+            ${p.error && p.status !== 'optional_disabled' ? `<span style="color:var(--red);font-size:0.85em"> ${esc(p.error)}</span>` : ''}
+          </p>`;
+        }).join('')}
       </div>
     `;
   } catch {

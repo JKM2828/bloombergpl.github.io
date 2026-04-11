@@ -342,14 +342,35 @@ async function fetchBatchQuotes(tickers, maxRequests = 20) {
 }
 
 /**
+ * Compute a granular status label for a provider health result.
+ * @param {object} h – raw health-check result
+ * @returns {'ok'|'cached'|'optional_disabled'|'rate_limited'|'circuit_open'|'down'}
+ */
+function deriveProviderStatus(h) {
+  if (h.error && typeof h.error === 'string' && h.error.includes('No API key')) return 'optional_disabled';
+  if (h.rateLimited) return 'rate_limited';
+  const cb = circuitState[h.provider];
+  if (cb && cb.openUntil > Date.now()) return 'circuit_open';
+  if (h.ok && h.cached) return 'cached';
+  if (h.ok) return 'ok';
+  return 'down';
+}
+
+/**
  * Health check all providers.
+ * Each result includes a granular `status` field:
+ *   ok | cached | optional_disabled | rate_limited | circuit_open | down
  */
 async function healthCheckAll() {
   const results = await Promise.allSettled(providers.map((p) => p.healthCheck()));
-  return results.map((r, i) => ({
-    provider: providers[i].name,
-    ...(r.status === 'fulfilled' ? r.value : { ok: false, error: r.reason?.message }),
-  }));
+  return results.map((r, i) => {
+    const raw = r.status === 'fulfilled' ? r.value : { ok: false, error: r.reason?.message };
+    return {
+      provider: providers[i].name,
+      ...raw,
+      status: deriveProviderStatus({ ...raw, provider: providers[i].name }),
+    };
+  });
 }
 
-module.exports = { fetchCandles, fetchBatchQuotes, healthCheckAll, getBudgetStats, isDegraded, _test: { cbRecord, cbIsOpen, tickerCbIsOpen, circuitState, tickerCircuitState, budgetAlertState, trackCall, globalBudgetRemaining, resetGlobalCounter } };
+module.exports = { fetchCandles, fetchBatchQuotes, healthCheckAll, getBudgetStats, isDegraded, _test: { cbRecord, cbIsOpen, tickerCbIsOpen, circuitState, tickerCircuitState, budgetAlertState, trackCall, globalBudgetRemaining, resetGlobalCounter, deriveProviderStatus } };

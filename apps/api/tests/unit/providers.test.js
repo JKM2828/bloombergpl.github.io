@@ -143,4 +143,33 @@ describe('providers/index', () => {
       assert.ok(remaining >= 0, 'remaining should be non-negative');
     });
   });
+
+  // ---- deriveProviderStatus ----
+  describe('deriveProviderStatus', () => {
+    it('returns ok for healthy provider', () => {
+      assert.equal(_test.deriveProviderStatus({ provider: 'yahoo', ok: true }), 'ok');
+    });
+
+    it('returns cached for ok+cached provider', () => {
+      assert.equal(_test.deriveProviderStatus({ provider: 'stooq-json', ok: true, cached: true }), 'cached');
+    });
+
+    it('returns optional_disabled for eodhd without API key', () => {
+      assert.equal(_test.deriveProviderStatus({ provider: 'eodhd', ok: false, error: 'No API key (set EODHD_API_KEY)' }), 'optional_disabled');
+    });
+
+    it('returns rate_limited for rate-limited provider', () => {
+      assert.equal(_test.deriveProviderStatus({ provider: 'stooq', ok: false, rateLimited: true }), 'rate_limited');
+    });
+
+    it('returns circuit_open when circuit breaker is tripped', () => {
+      // Trip circuit for gpw
+      for (let i = 0; i < 5; i++) _test.cbRecord('gpw', false, null);
+      assert.equal(_test.deriveProviderStatus({ provider: 'gpw', ok: false }), 'circuit_open');
+    });
+
+    it('returns down for failed provider with no special condition', () => {
+      assert.equal(_test.deriveProviderStatus({ provider: 'stooq', ok: false, error: 'Connection timeout' }), 'down');
+    });
+  });
 });

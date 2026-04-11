@@ -635,6 +635,9 @@ router.get('/health', async (req, res) => {
     recoveryBlockers.push('Worker scheduler is not running');
   }
 
+  // Active alerts (from worker checkAlerts)
+  const alerts = checkAlerts();
+
   res.json({
     status: effectiveStatus,
     uptime: process.uptime() | 0,
@@ -645,6 +648,7 @@ router.get('/health', async (req, res) => {
     freshness: { fresh: freshCount, stale: staleCount, total: instrumentCount },
     dataStale,
     recoveryBlockers: recoveryBlockers.length > 0 ? recoveryBlockers : undefined,
+    alerts: alerts.length > 0 ? alerts : undefined,
     db: dbHealth,
     queue: { pending: pendingJobs, running: runningJobs },
     providers,

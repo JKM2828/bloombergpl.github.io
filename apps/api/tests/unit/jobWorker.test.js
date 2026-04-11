@@ -65,8 +65,20 @@ describe('jobWorker', () => {
     it('returns array of alerts', () => {
       // provide lastCycleStats mock
       mockDb.pushQueryResult([]); // stuckJobs query
+      mockDb.pushQueryOneResult(null); // data_stale: lastIngest query
       const alerts = jobWorker.checkAlerts();
       assert.ok(Array.isArray(alerts));
+    });
+
+    it('includes data_stale alert when no ingest for >2h', () => {
+      mockDb.pushQueryResult([]); // stuckJobs
+      // Simulate lastIngest 3 hours ago
+      const threeHoursAgo = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
+      mockDb.pushQueryOneResult({ d: threeHoursAgo });
+      const alerts = jobWorker.checkAlerts();
+      const staleAlert = alerts.find(a => a.type === 'data_stale');
+      assert.ok(staleAlert, 'data_stale alert must exist when ingest is >2h old');
+      assert.equal(staleAlert.level, 'critical');
     });
   });
 

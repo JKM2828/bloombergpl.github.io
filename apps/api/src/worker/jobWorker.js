@@ -634,6 +634,7 @@ function startScheduler() {
   // ========== QUEUE DRAIN safety net (every 2 min, 24/7) ==========
   cron.schedule('*/2 * * * *', () => {
     stats.mode = getCurrentMode();
+    checkAlerts(); // fire alerts on every drain cycle
     drainQueue().catch(console.error);
   });
 
@@ -721,6 +722,20 @@ function checkAlerts() {
       alerts.push({ level: 'critical', type: 'crisis_coverage', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < 60% and no historical features — analysis halted` });
     } else {
       alerts.push({ level: 'warning', type: 'low_ingest', message: `Ingest coverage ${lastCycle.liveCoveragePct}% < 60% — running on historical data` });
+    }
+  }
+
+  // Data stale check — fires when no successful ingest for >2 hours (any mode)
+  const lastIngestRow = queryOne("SELECT MAX(created_at) as d FROM ingest_log WHERE status = 'ok'");
+  if (lastIngestRow?.d) {
+    const ingestAgeMin = (now - new Date(lastIngestRow.d).getTime()) / 60000;
+    if (ingestAgeMin > 120) {
+      alerts.push({ level: 'critical', type: 'data_stale', message: `No successful ingest for ${Math.round(ingestAgeMin / 60)}h — data may be stale` });
+    }
+  } else if (stats.startedAt) {
+    const upMin = (now - new Date(stats.startedAt).getTime()) / 60000;
+    if (upMin > 30) {
+      alerts.push({ level: 'critical', type: 'no_ingest_ever', message: `Worker running ${Math.round(upMin)} min — no successful ingest on record` });
     }
   }
 

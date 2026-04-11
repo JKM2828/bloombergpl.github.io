@@ -205,4 +205,14 @@ describe('health endpoint contract', () => {
     assert.ok(recoveryBlockers.includes('EODHD_API_KEY not configured'));
     assert.ok(recoveryBlockers.includes('Batch partial'));
   });
+
+  it('provider health result includes granular status field', () => {
+    const providerManager = require('../../src/providers');
+    const { deriveProviderStatus } = providerManager._test;
+    // Verify deriveProviderStatus exists and returns known values
+    assert.ok(typeof deriveProviderStatus === 'function', 'deriveProviderStatus must be exported in _test');
+    const statuses = ['ok', 'cached', 'optional_disabled', 'rate_limited', 'circuit_open', 'down'];
+    const result = deriveProviderStatus({ provider: 'yahoo', ok: true });
+    assert.ok(statuses.includes(result), `status must be one of: ${statuses.join(', ')}`);
+  });
 });
