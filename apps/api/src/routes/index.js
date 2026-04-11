@@ -611,12 +611,13 @@ router.get('/health', async (req, res) => {
 
   // Overall status considers DB save failures, provider health, AND data staleness
   const dbOk = dbHealth.saveFailCount < 3;
-  const effectiveStatus = !dbOk ? 'degraded'
-    : (dataStale && staleCount === instrumentCount) ? 'degraded'
-    : providerStatus;
-
   const worker = getWorkerStatus();
   const freshnessFull = staleCount <= 0;
+  // If all data is fresh and system is operational, provider-level failures are not actionable
+  const effectiveStatus = !dbOk ? 'degraded'
+    : (dataStale && staleCount === instrumentCount) ? 'degraded'
+    : (freshnessFull && worker.isRunning && dbOk) ? 'ok'
+    : providerStatus;
 
   // Recovery blockers: list what is preventing the system from recovering
   // Suppress informational items when system is fully healthy

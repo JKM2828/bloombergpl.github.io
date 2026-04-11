@@ -117,6 +117,37 @@ describe('health endpoint contract', () => {
     assert.ok(providers.some(p => p.provider === 'eodhd'), 'EODHD must still be listed in providers');
   });
 
+  it('freshness-full override yields ok status even when required providers fail', () => {
+    // When data is 100% fresh, db ok, worker running — provider failures are non-actionable
+    const providers = [
+      { provider: 'gpw', ok: false },
+      { provider: 'stooq-json', ok: true },
+      { provider: 'stooq', ok: false, candles: 0 },
+      { provider: 'eodhd', ok: false, error: 'No API key (set EODHD_API_KEY)' },
+      { provider: 'yahoo', ok: true, candles: 4 },
+    ];
+    const isOptionalDisabled = (p) => p.provider === 'eodhd' && typeof p.error === 'string' && p.error.includes('No API key');
+    const requiredProviders = providers.filter(p => !isOptionalDisabled(p));
+    const allOk = requiredProviders.every(p => p.ok);
+    const anyOk = requiredProviders.some(p => p.ok);
+    const providerStatus = allOk ? 'ok' : anyOk ? 'degraded' : 'down';
+
+    const dbOk = true;
+    const workerRunning = true;
+    const freshnessFull = true;
+    const dataStale = false;
+    const staleCount = 0;
+    const instrumentCount = 162;
+
+    const effectiveStatus = !dbOk ? 'degraded'
+      : (dataStale && staleCount === instrumentCount) ? 'degraded'
+      : (freshnessFull && workerRunning && dbOk) ? 'ok'
+      : providerStatus;
+
+    assert.equal(providerStatus, 'degraded', 'providerStatus alone would be degraded');
+    assert.equal(effectiveStatus, 'ok', 'effectiveStatus must be ok when freshness is full and system operational');
+  });
+
   it('suppresses EODHD blocker and batch partial when freshness is full', () => {
     const providers = [
       { provider: 'gpw', ok: true },
