@@ -15,10 +15,11 @@ const { fetchIntraday } = require('../providers/stooqIntradayProvider');
 const gpwProvider = require('../providers/gpwProvider');
 
 // ---- Dynamic budget: adapts to time-of-day mode ----
+// Fallback budget raised to handle partial batch results from Stooq JSON
 const BUDGET_PROFILES = {
-  market:     { batch: 15, fallback: 5 },  // aggressive during session
-  'off-hours': { batch: 10, fallback: 2 }, // eco mode — save API quota
-  night:      { batch: 5,  fallback: 1 },  // minimal — unlikely new data
+  market:     { batch: 15, fallback: 20 },  // aggressive during session — enough for full fallback
+  'off-hours': { batch: 10, fallback: 10 }, // eco mode — still meaningful fallback
+  night:      { batch: 5,  fallback: 3 },   // minimal — unlikely new data
 };
 
 function getBudget() {
@@ -67,9 +68,8 @@ function warsawNow(now) {
 
 /**
  * Check if a ticker already has fresh data.
- * Daily candles: fresh if last candle date is from today or the previous trading day.
- * During market hours we still accept same-day or prev-trading-day dailies as fresh
- * because EOD candle won't exist until after close.
+ * Daily candles: fresh if last candle date is from the latest trading day.
+ * Uses Warsaw timezone for correct day-of-week logic.
  * Intraday candles (5m/1h): fresh only if updated within last 20 min during market.
  */
 function isTickerFresh(ticker) {
@@ -87,9 +87,12 @@ function isTickerFresh(ticker) {
   const diffDays = Math.floor((now - lastDate) / 86400000);
   if (diffDays <= 0) return true; // same day
   if (diffDays === 1) return true; // yesterday
-  if (dow === 6 && diffDays <= 2) return true; // Saturday → Friday ok
-  if (dow === 0 && diffDays <= 3) return true; // Sunday → Friday ok
+  // Weekend tolerance: accept Friday's candle on Sat/Sun/Mon
+  if (dow === 6 && diffDays <= 1) return true; // Saturday → Friday ok (diffDays=1 already covered above)
+  if (dow === 0 && diffDays <= 2) return true; // Sunday → Friday ok
   if (dow === 1 && diffDays <= 3) return true; // Monday → Friday ok
+  // Hard stale guard: anything older than 4 calendar days is never fresh
+  // This prevents stale data from weeks/months ago being silently accepted
   return false;
 }
 
@@ -194,10 +197,14 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
   }
 
   // ==== PHASE 2: Fallback for tickers NOT in batch result ====
+  // Adaptive: if batch coverage was low, expand fallback budget proportionally
   const missingTickers = tickers.filter(t => !batchData.has(t));
-  if (missingTickers.length > 0 && totalHttpCalls < (MAX_BATCH_REQUESTS + MAX_FALLBACK_REQUESTS)) {
-    const remainingBudget = (MAX_BATCH_REQUESTS + MAX_FALLBACK_REQUESTS) - totalHttpCalls;
-    console.log(`[ingest] Phase 2: Fallback for ${missingTickers.length} missing tickers (budget: ${remainingBudget} calls)...`);
+  const adaptiveFallback = batchCoveragePct < 50
+    ? Math.max(MAX_FALLBACK_REQUESTS, Math.min(missingTickers.length, 30))
+    : MAX_FALLBACK_REQUESTS;
+  if (missingTickers.length > 0 && totalHttpCalls < (MAX_BATCH_REQUESTS + adaptiveFallback)) {
+    const remainingBudget = (MAX_BATCH_REQUESTS + adaptiveFallback) - totalHttpCalls;
+    console.log(`[ingest] Phase 2: Fallback for ${missingTickers.length} missing tickers (budget: ${remainingBudget} calls, adaptive: ${adaptiveFallback > MAX_FALLBACK_REQUESTS})...`);
     const dateTo = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const dateFrom = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
 
@@ -274,7 +281,13 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
       }
     }
   } else if (missingTickers.length > 0) {
-    console.warn(`[ingest] Skipping fallback — HTTP budget exhausted (${totalHttpCalls} calls used). ${missingTickers.length} tickers still missing.`);
+    console.warn(`[ingest] Skipping fallback — HTTP budget exhausted (${totalHttpCalls}/${MAX_BATCH_REQUESTS + adaptiveFallback} calls used). ${missingTickers.length} tickers still missing.`);
+    // Log the missing tickers for operator visibility (first 20)
+    if (missingTickers.length <= 30) {
+      console.warn(`[ingest] Missing tickers: ${missingTickers.join(', ')}`);
+    } else {
+      console.warn(`[ingest] Missing tickers (first 20): ${missingTickers.slice(0, 20).join(', ')}... and ${missingTickers.length - 20} more`);
+    }
   }
 
   // Auto-deactivate tickers with repeated no-data (provider-agnostic)
@@ -308,17 +321,22 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
   console.log(`[ingest] New candles: ${total}, errors: ${errors}, no-data: ${noDataTickers.length}, rate-limited: ${rateLimited}`);
   console.log(`[ingest] ================================`);
 
-  const budgetExhausted = totalHttpCalls >= (MAX_BATCH_REQUESTS + MAX_FALLBACK_REQUESTS) && missingTickers.length > 0;
+  const effectiveFallbackBudget = typeof adaptiveFallback !== 'undefined' ? adaptiveFallback : MAX_FALLBACK_REQUESTS;
+  const budgetExhausted = totalHttpCalls >= (MAX_BATCH_REQUESTS + effectiveFallbackBudget) && missingTickers.length > 0;
   if (budgetExhausted) {
     console.warn(`[ingest] ⚠️  Budget exhausted: ${totalHttpCalls} calls used, ${missingTickers.length} tickers still missing data`);
   }
+
+  // Compute final missing count (tickers that got neither batch nor fallback data)
+  const stillMissing = tickers.filter(t => !batchData.has(t)).length - fallbackHits;
 
   const result = {
     total, errors, tickers: tickers.length, skippedFresh,
     batchHits, fallbackHits, noData: noDataTickers.length, rateLimited,
     httpCalls: totalHttpCalls, retryRecovered, batchCoveragePct, liveCoveragePct,
     mode: getCurrentMode(), timestamp: new Date().toISOString(),
-    budgetExhausted,
+    budgetExhausted, stillMissing: Math.max(0, stillMissing),
+    batchPartial: batchData.size > 0 && batchData.size < tickers.length,
   };
   lastCycleStats = result;
   return result;

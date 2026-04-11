@@ -594,16 +594,51 @@ router.get('/health', async (req, res) => {
   // If at least one provider works → ok or degraded; all down/limited → rate_limited or down
   const providerStatus = allOk ? 'ok' : anyOk ? 'degraded' : anyRateLimited ? 'rate_limited' : 'down';
 
-  // Overall status considers DB save failures and provider health
+  // Data freshness: check how many tickers have recent data (< 3 days)
+  const freshCount = (queryOne(
+    "SELECT COUNT(DISTINCT ticker) as n FROM candles WHERE date >= date('now', '-3 days')"
+  ) || {}).n || 0;
+  const staleCount = instrumentCount - freshCount;
+
+  // Data staleness detection: if lastIngest is older than 24h, flag it
+  const lastIngestAge = lastIngest ? Math.round((Date.now() - new Date(lastIngest).getTime()) / 1000) : null;
+  const dataStale = lastIngestAge != null && lastIngestAge > 86400;
+
+  // Last ingest cycle stats (from worker)
+  const lastCycle = getLastCycleStats();
+
+  // Overall status considers DB save failures, provider health, AND data staleness
   const dbOk = dbHealth.saveFailCount < 3;
-  const status = !dbOk ? 'degraded' : providerStatus;
+  const effectiveStatus = !dbOk ? 'degraded'
+    : (dataStale && staleCount === instrumentCount) ? 'degraded'
+    : providerStatus;
+
+  // Recovery blockers: list what is preventing the system from recovering
+  const recoveryBlockers = [];
+  if (providers.some(p => p.error && p.error.includes('No API key'))) {
+    recoveryBlockers.push('EODHD_API_KEY not configured (optional provider disabled)');
+  }
+  if (lastCycle?.budgetExhausted) {
+    recoveryBlockers.push('HTTP budget exhausted in last ingest cycle');
+  }
+  if (lastCycle?.batchPartial) {
+    recoveryBlockers.push(`Batch partial: ${lastCycle.batchHits}/${lastCycle.tickers} tickers from Stooq JSON`);
+  }
+  const worker = getWorkerStatus();
+  if (!worker.isRunning) {
+    recoveryBlockers.push('Worker scheduler is not running');
+  }
 
   res.json({
-    status,
+    status: effectiveStatus,
     uptime: process.uptime() | 0,
     instruments: instrumentCount,
     candles: candleCount,
     lastIngest,
+    lastIngestAgeSec: lastIngestAge,
+    freshness: { fresh: freshCount, stale: staleCount, total: instrumentCount },
+    dataStale,
+    recoveryBlockers: recoveryBlockers.length > 0 ? recoveryBlockers : undefined,
     db: dbHealth,
     queue: { pending: pendingJobs, running: runningJobs },
     providers,
@@ -1000,11 +1035,26 @@ router.get('/diagnostics/freshness', (req, res) => {
   }
   const staleCount = results.filter(r => r.stale).length;
   const budgetStats = providerManager.getBudgetStats();
+  const lastCycle = getLastCycleStats();
+  const worker = getWorkerStatus();
   res.json({
     total: results.length,
     fresh: results.length - staleCount,
     stale: staleCount,
     budget: budgetStats,
+    lastIngestCycle: lastCycle ? {
+      timestamp: lastCycle.timestamp,
+      batchCoveragePct: lastCycle.batchCoveragePct,
+      liveCoveragePct: lastCycle.liveCoveragePct,
+      batchHits: lastCycle.batchHits,
+      fallbackHits: lastCycle.fallbackHits,
+      httpCalls: lastCycle.httpCalls,
+      budgetExhausted: lastCycle.budgetExhausted,
+      batchPartial: lastCycle.batchPartial,
+      stillMissing: lastCycle.stillMissing,
+    } : null,
+    workerRunning: worker.isRunning,
+    workerMode: worker.currentMode,
     tickers: results,
   });
 });

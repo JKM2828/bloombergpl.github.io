@@ -638,6 +638,17 @@ function startScheduler() {
   });
 
   console.log('[worker] Scheduler started — market(15m) | off-hours(60m) | night(drain-only)');
+
+  // ========== BOOTSTRAP: immediate ingest on startup ==========
+  // Prevents data staleness after server restart/deploy
+  const mode = getCurrentMode();
+  if (mode === 'market' || mode === 'off-hours') {
+    console.log(`[worker] Bootstrap: enqueueing immediate ingest (mode=${mode})`);
+    enqueueJob('ingest', { mode: 'incremental' }, 2);
+    drainQueue().catch(err => console.error('[worker] Bootstrap drain error:', err.message));
+  } else {
+    console.log(`[worker] Bootstrap: skipping ingest (mode=${mode}, night)`);
+  }
 }
 
 function stopScheduler() {

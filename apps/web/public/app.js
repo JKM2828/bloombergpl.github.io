@@ -351,17 +351,26 @@ async function loadSystemStatus() {
     const stooq = (data.providers || []).find((p) => p.provider === 'stooq' || p.provider === 'stooq-json');
     const allDown = (data.providers || []).every(p => !p.ok);
     const limitHint = allDown ? '<p style="color:var(--yellow)">Uwaga: Wszystkie źródła danych chwilowo niedostępne – dashboard pokazuje dane z bazy.</p>' : '';
-    const freshnessLine = freshness
-      ? `<p>Świeżość: <strong>${freshness.fresh}/${freshness.total}</strong> świeżych, <strong>${freshness.stale}</strong> oczekuje na ingest</p>`
+    // Use inline freshness from /health if available, fallback to /freshness endpoint
+    const fr = data.freshness || freshness;
+    const freshnessLine = fr
+      ? `<p>Świeżość: <strong>${fr.fresh}/${fr.total}</strong> świeżych, <strong>${fr.stale}</strong> oczekuje na ingest</p>`
+      : '';
+    const lastIngestAge = data.lastIngestAgeSec != null
+      ? `<span style="color:${data.dataStale ? 'var(--red)' : 'var(--text-muted)'};font-size:0.85em"> (${Math.round(data.lastIngestAgeSec / 3600)}h temu)</span>`
+      : '';
+    const blockersHtml = data.recoveryBlockers && data.recoveryBlockers.length > 0
+      ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--yellow)">⚠ Blokady recovery (${data.recoveryBlockers.length})</summary><ul style="margin:4px 0 0 16px;font-size:0.85em">${data.recoveryBlockers.map(b => `<li>${esc(b)}</li>`).join('')}</ul></details>`
       : '';
     document.getElementById('system-status').innerHTML = `
       <div style="font-size:0.9em">
         <p>Status: <strong style="color:${statusColor}">${esc(data.status).toUpperCase()}</strong></p>
         <p>Instrumenty: <strong>${data.instruments}</strong></p>
         <p>Świece w bazie: <strong>${data.candles.toLocaleString()}</strong></p>
-        <p>Ostatni ingest: <strong>${esc(data.lastIngest || 'brak')}</strong></p>
+        <p>Ostatni ingest: <strong>${esc(data.lastIngest || 'brak')}</strong>${lastIngestAge}</p>
         ${freshnessLine}
         ${limitHint}
+        ${blockersHtml}
         <p>Providery:</p>
         ${data.providers.map(p => `
           <p style="margin-left:12px">
