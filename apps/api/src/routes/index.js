@@ -628,7 +628,7 @@ router.get('/health', async (req, res) => {
   if (lastCycle?.budgetExhausted) {
     recoveryBlockers.push('HTTP budget exhausted in last ingest cycle');
   }
-  if (lastCycle?.batchPartial && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
+  if (lastCycle?.batchPartial && !freshnessFull && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
     recoveryBlockers.push(`Batch partial: ${lastCycle.batchHits}/${lastCycle.tickers} tickers from Stooq JSON`);
   }
   if (!worker.isRunning) {

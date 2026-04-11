@@ -292,6 +292,7 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
 
   // Auto-deactivate tickers with repeated no-data (provider-agnostic)
   // Requires 5 consecutive no-data attempts before deactivation.
+  let autoDeactivated = 0;
   if (noDataTickers.length > 0) {
     for (const ticker of noDataTickers) {
       const recentLogs = query(
@@ -301,6 +302,7 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
       // Only deactivate when we have at least 5 logged attempts AND all are no-data
       if (recentLogs.length >= 5 && recentLogs.every(r => r.rows_inserted === 0)) {
         run('UPDATE instruments SET active = 0 WHERE ticker = ?', [ticker]);
+        autoDeactivated++;
         console.warn(`[ingest] ${ticker}: auto-deactivated (no data after 5 consecutive attempts)`);
       }
     }
@@ -328,7 +330,8 @@ async function ingestAll(lookbackDays = 365, skipFresh = true) {
   }
 
   // Compute final missing count (tickers that got neither batch nor fallback data)
-  const stillMissing = tickers.filter(t => !batchData.has(t)).length - fallbackHits;
+  // Subtract auto-deactivated tickers — they are no longer in the active universe
+  const stillMissing = tickers.filter(t => !batchData.has(t)).length - fallbackHits - autoDeactivated;
 
   const result = {
     total, errors, tickers: tickers.length, skippedFresh,

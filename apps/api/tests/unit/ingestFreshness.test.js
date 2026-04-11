@@ -159,7 +159,9 @@ describe('health endpoint contract', () => {
     const workerRunning = true;
     const freshnessFull = true;  // staleCount <= 0
     const staleCount = 0;
-    const lastCycle = { batchPartial: true, batchHits: 162, tickers: 163, stillMissing: 0, budgetExhausted: false };
+    // Use stillMissing: 1 to verify freshnessFull suppresses batch partial blocker
+    // even when not all batch tickers were covered (e.g. auto-deactivated)
+    const lastCycle = { batchPartial: true, batchHits: 162, tickers: 163, stillMissing: 1, budgetExhausted: false };
 
     const recoveryBlockers = [];
     if (providers.some(p => isOptionalDisabled(p)) && !(freshnessFull && workerRunning && dbOk)) {
@@ -168,7 +170,7 @@ describe('health endpoint contract', () => {
     if (lastCycle?.budgetExhausted) {
       recoveryBlockers.push('HTTP budget exhausted');
     }
-    if (lastCycle?.batchPartial && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
+    if (lastCycle?.batchPartial && !freshnessFull && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
       recoveryBlockers.push('Batch partial');
     }
     if (!workerRunning) {
@@ -195,7 +197,7 @@ describe('health endpoint contract', () => {
     if (providers.some(p => isOptionalDisabled(p)) && !(freshnessFull && workerRunning && dbOk)) {
       recoveryBlockers.push('EODHD_API_KEY not configured');
     }
-    if (lastCycle?.batchPartial && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
+    if (lastCycle?.batchPartial && !freshnessFull && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
       recoveryBlockers.push('Batch partial');
     }
 
