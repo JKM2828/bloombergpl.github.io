@@ -9,6 +9,12 @@ const mockDb = require('../helpers/setup');
 
 const {
   getBalance,
+  getAvailableBalance,
+  getTotalBalance,
+  getPendingCash,
+  settleMaturedTransactions,
+  addBusinessDays,
+  SETTLEMENT_DAYS,
   getPositions,
   deposit,
   withdraw,
@@ -142,20 +148,24 @@ describe('portfolioService', () => {
       assert.throws(() => sell('PKOBP', 10), /Nie posiadasz/);
     });
 
-    it('returns sell result with correct fields', () => {
+    it('returns sell result with settlement fields', () => {
       // getPositions: shares calc
       mockDb.pushQueryResult([{ ticker: 'PKOBP', shares: 20, totalCost: 2000, totalBought: 20 }]);
       // getPositions currentPrice candle
       mockDb.pushQueryOneResult({ close: 110 });
       // sell: queryOne for candle
       mockDb.pushQueryOneResult({ close: 110 });
-      // getBalance after run()
+      // getAvailableBalance after run()
       mockDb.pushQueryOneResult({ balance: 11100 });
+      // getPendingCash after run()
+      mockDb.pushQueryOneResult({ pending: 1100 });
       const result = sell('PKOBP', 10);
       assert.equal(result.ticker, 'PKOBP');
       assert.equal(result.shares, 10);
       assert.equal(result.price, 110);
       assert.equal(result.proceeds, 1100);
+      assert.ok(result.settlementDate, 'settlement date should be present');
+      assert.ok(result.pendingCash != null, 'pending cash should be returned');
     });
   });
 
@@ -222,6 +232,66 @@ describe('portfolioService', () => {
       mockDb.pushQueryResult([]);
       const positions = getPositions();
       assert.deepEqual(positions, []);
+    });
+  });
+
+  // ---- T+2 Settlement ----
+  describe('T+2 settlement', () => {
+    it('SETTLEMENT_DAYS is 2', () => {
+      assert.equal(SETTLEMENT_DAYS, 2);
+    });
+
+    it('addBusinessDays skips weekends', () => {
+      // Friday 2026-04-10 + 2 business days = Tuesday 2026-04-14
+      assert.equal(addBusinessDays('2026-04-10', 2), '2026-04-14');
+      // Monday 2026-04-13 + 2 business days = Wednesday 2026-04-15
+      assert.equal(addBusinessDays('2026-04-13', 2), '2026-04-15');
+      // Wednesday + 2 = Friday
+      assert.equal(addBusinessDays('2026-04-15', 2), '2026-04-17');
+    });
+
+    it('addBusinessDays handles 0 days', () => {
+      assert.equal(addBusinessDays('2026-04-10', 0), '2026-04-10');
+    });
+
+    it('buy reports pending cash in error message', () => {
+      // candle price
+      mockDb.pushQueryOneResult({ close: 100 });
+      // settleMaturedTransactions (run returns nothing special in mock)
+      // getAvailableBalance
+      mockDb.pushQueryOneResult({ balance: 500 });
+      // getPendingCash
+      mockDb.pushQueryOneResult({ pending: 1000 });
+      assert.throws(() => buy('CDR', 10), /w rozliczeniu T\+2/);
+    });
+
+    it('buy works when available balance is sufficient', () => {
+      // candle
+      mockDb.pushQueryOneResult({ close: 50 });
+      // settleMaturedTransactions (no-op)
+      // getAvailableBalance
+      mockDb.pushQueryOneResult({ balance: 5000 });
+      // after buy: getAvailableBalance
+      mockDb.pushQueryOneResult({ balance: 4500 });
+      // getPendingCash
+      mockDb.pushQueryOneResult({ pending: 0 });
+      const result = buy('PKO', 10);
+      assert.equal(result.cost, 500);
+      assert.equal(result.balance, 4500);
+      assert.equal(result.pendingCash, 0);
+    });
+
+    it('sell returns settlement date 2+ business days in the future', () => {
+      mockDb.pushQueryResult([{ ticker: 'CDR', shares: 10, totalCost: 1000, totalBought: 10 }]);
+      mockDb.pushQueryOneResult({ close: 120 }); // getPositions candle
+      mockDb.pushQueryOneResult({ close: 120 }); // sell candle
+      mockDb.pushQueryOneResult({ balance: 1200 }); // getAvailableBalance
+      mockDb.pushQueryOneResult({ pending: 1200 }); // getPendingCash
+      const result = sell('CDR', 10);
+      assert.ok(result.settlementDate);
+      // Settlement should be at least 2 days after today
+      const today = new Date().toISOString().slice(0, 10);
+      assert.ok(result.settlementDate > today, `settlement ${result.settlementDate} should be after ${today}`);
     });
   });
 });

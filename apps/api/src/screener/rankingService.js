@@ -20,10 +20,10 @@ const { getSector, getSectorPeers } = require('../data/sectors');
 // QUALITY GATES – pick must pass ALL to be published
 // ============================================================
 const QUALITY_GATES = {
-  minConfidence: 0.45,        // ML confidence threshold (DATA-M2: raised from 0.35)
-  minExpectedReturn: 0.01,    // >1.0% expected return (DATA-M2: raised from 0.5%)
+  minConfidence: 0.55,        // ML confidence threshold (offensive: raised from 0.45)
+  minExpectedReturn: 0.015,   // >1.5% expected return (offensive: raised from 1.0%)
   minLiquidityScore: 0.3,     // execution score threshold
-  minCompositeScore: 30,      // overall composite score
+  minCompositeScore: 35,      // overall composite score (offensive: raised from 30)
   maxConcurrentPicks: 5,      // hard cap on published signals
   maxSectorConcentration: 2,  // max picks from same sector
 };
@@ -631,10 +631,17 @@ function getDailyPicks(opts = {}) {
     });
   }
 
+  // Total active instruments in universe (before any filtering)
+  const universeRow = queryOne(
+    "SELECT COUNT(*) AS cnt FROM instruments WHERE active = 1 AND type IN ('STOCK','ETF','FUTURES')"
+  );
+  const universeTotal = universeRow?.cnt || 0;
+
   return {
     picks,
     regime: ranking[0]?.metrics?.regime || 'neutral',
     rankedAt: ranking[0]?.ranked_at || null,
+    universeTotal,
     totalScreened: ranking.length,
     totalCandidates: candidates.length,
     passedGates: gated.length,

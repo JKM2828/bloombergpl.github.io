@@ -34,7 +34,7 @@ describe('computeCompetitionAllocation', () => {
     const pick = {
       ticker: 'CDR', type: 'STOCK',
       metrics: { lastClose: 200 },
-      ml: { confidence: 10, expectedReturn: 5 }, // 10% = 0.10 < 0.30
+      ml: { confidence: 10, expectedReturn: 5 }, // 10% = 0.10 < 0.40
       compositeScore: 50,
       sell: { failSafeStopPct: 6 },
     };
@@ -47,7 +47,7 @@ describe('computeCompetitionAllocation', () => {
     const pick = {
       ticker: 'CDR', type: 'STOCK',
       metrics: { lastClose: 200 },
-      ml: { confidence: 60, expectedReturn: 0.1 }, // 0.1% = 0.001 < 0.003
+      ml: { confidence: 60, expectedReturn: 0.1 }, // 0.1% = 0.001 < 0.008
       compositeScore: 50,
       sell: { failSafeStopPct: 6 },
     };
@@ -61,7 +61,7 @@ describe('computeCompetitionAllocation', () => {
       ticker: 'CDR', type: 'STOCK',
       metrics: { lastClose: 200 },
       ml: { confidence: 60, expectedReturn: 5 },
-      compositeScore: 10, // < 25
+      compositeScore: 10, // < 30
       sell: { failSafeStopPct: 6 },
     };
     const result = computeCompetitionAllocation(pick);

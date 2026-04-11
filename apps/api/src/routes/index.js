@@ -519,7 +519,10 @@ router.post('/ingest/intraday5m', requireAdmin, async (req, res) => {
 // Portfolio
 // ============================================================
 router.get('/portfolio/balance', (req, res) => {
-  res.json({ balance: portfolio.getBalance() });
+  const available = portfolio.getAvailableBalance();
+  const pending = portfolio.getPendingCash();
+  const total = portfolio.getTotalBalance();
+  res.json({ balance: available, availableCash: available, pendingCash: pending, totalBalance: total });
 });
 
 router.get('/portfolio/positions', (req, res) => {
@@ -1438,12 +1441,21 @@ router.get('/competition/decision', (req, res) => {
   if (!bestPick) guardReasons.push('no_picks_available');
   if (allocation && allocation.blocked) guardReasons.push(...allocation.blockReasons);
 
-  const ready = guardReasons.length === 0 && bestPick && allocation && !allocation.blocked;
+  // Freshness gate — block if ranking too old during market hours
+  const isMarketComp = getCurrentMode() === 'market';
+  if (isMarketComp && dataAgeSec != null && dataAgeSec > COMPETITION_DEFAULTS.freshnessGateSec) {
+    guardReasons.push(`stale_ranking_${dataAgeSec}s`);
+  }
 
-  // 7. Open competition positions (to check duplicates)
+  // Max open positions gate
   const openPositions = query(
     "SELECT ticker, shares, entry_price, entry_date FROM competition_portfolio WHERE status = 'open'"
   );
+  if (openPositions.length >= (COMPETITION_DEFAULTS.maxOpenPositions || 3)) {
+    guardReasons.push(`max_open_positions_${openPositions.length}`);
+  }
+
+  const ready = guardReasons.length === 0 && bestPick && allocation && !allocation.blocked;
   const alreadyHolding = bestPick ? openPositions.some(p => p.ticker === bestPick.ticker) : false;
 
   // 8. Enrich top 5 with individual allocations
@@ -1549,6 +1561,22 @@ router.post('/competition/auto-buy', requireAdmin, (req, res) => {
   if (hasCriticalAlert) guardReasons.push('blocked_by_critical_alert');
   if (precisionKPI && precisionKPI.status === 'critical') guardReasons.push('blocked_by_precision');
   if (coveragePct !== null && coveragePct < 5) guardReasons.push('blocked_by_low_coverage');
+
+  // Freshness gate — refuse auto-buy on stale ranking during market hours
+  const rankedAtBuy = picksData.rankedAt || null;
+  const dataAgeSecBuy = rankedAtBuy ? Math.round((Date.now() - new Date(rankedAtBuy).getTime()) / 1000) : null;
+  const isMarketBuy = getCurrentMode() === 'market';
+  if (isMarketBuy && dataAgeSecBuy != null && dataAgeSecBuy > COMPETITION_DEFAULTS.freshnessGateSec) {
+    guardReasons.push(`stale_ranking_${dataAgeSecBuy}s`);
+  }
+
+  // Max open positions gate
+  const openPosBuy = query(
+    "SELECT id FROM competition_portfolio WHERE status = 'open'"
+  );
+  if (openPosBuy.length >= (COMPETITION_DEFAULTS.maxOpenPositions || 3)) {
+    guardReasons.push(`max_open_positions_${openPosBuy.length}`);
+  }
 
   if (guardReasons.length > 0) {
     return res.status(422).json({ success: false, reason: 'guardrails_blocked', guardReasons });
@@ -1766,11 +1794,34 @@ router.get('/competition/history', (req, res) => {
   const closed = trades.filter(t => t.status === 'closed');
   const wins = closed.filter(t => t.exit_price > t.entry_price).length;
   const losses = closed.filter(t => t.exit_price <= t.entry_price).length;
+
+  // KPI metrics for offensive mode
+  let avgPnlPct = null;
+  let avgHoldDays = null;
+  let totalRealizedPnl = 0;
+  if (closed.length > 0) {
+    let sumPnlPct = 0;
+    let sumHoldDays = 0;
+    for (const t of closed) {
+      const pnlPct = ((t.exit_price - t.entry_price) / t.entry_price) * 100;
+      sumPnlPct += pnlPct;
+      totalRealizedPnl += (t.exit_price - t.entry_price) * t.shares;
+      if (t.entry_date && t.exit_date) {
+        sumHoldDays += Math.max(1, Math.floor((new Date(t.exit_date) - new Date(t.entry_date)) / 86400000));
+      }
+    }
+    avgPnlPct = Math.round(sumPnlPct / closed.length * 100) / 100;
+    avgHoldDays = Math.round(sumHoldDays / closed.length * 10) / 10;
+  }
+
   res.json({
     totalTrades: closed.length,
     wins,
     losses,
     winRate: closed.length > 0 ? Math.round(wins / closed.length * 100) : null,
+    avgPnlPct,
+    avgHoldDays,
+    totalRealizedPnl: Math.round(totalRealizedPnl * 100) / 100,
     trades,
   });
 });

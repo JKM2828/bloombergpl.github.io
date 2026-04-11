@@ -77,6 +77,8 @@ async function migrate() {
       shares REAL,
       price REAL,
       amount REAL NOT NULL,
+      settlement_status TEXT DEFAULT 'settled',
+      settlement_date TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     )
   `);
@@ -313,6 +315,10 @@ async function migrate() {
   `);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_comp_port_status ON competition_portfolio(status)`);
+
+  // ---- Settlement: add columns if missing (safe for existing DBs) ----
+  try { db.run(`ALTER TABLE portfolio_transactions ADD COLUMN settlement_status TEXT DEFAULT 'settled'`); } catch (_) { /* column exists */ }
+  try { db.run(`ALTER TABLE portfolio_transactions ADD COLUMN settlement_date TEXT`); } catch (_) { /* column exists */ }
 
   // ---- T+1 Top Gainers predictions ----
   db.run(`

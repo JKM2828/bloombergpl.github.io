@@ -245,7 +245,8 @@ async function loadLiveSignals() {
         ${coverageWarning}
         <div style="font-size:0.75em;color:var(--text-muted);margin-bottom:8px">
           Reżim: <strong>${picksData.regime}</strong> |
-          Przeskanowano: ${picksData.totalScreened || '—'} |
+          Uniwersum: ${picksData.universeTotal || '—'} |
+          W rankingu: ${picksData.totalScreened || '—'} |
           Przeszło filtry: ${picksData.passedGates || '—'} |
           Min pewność: ${(gates.minConfidence || 0) * 100}% |
           <span style="font-size:0.9em">${picksData.generatedAt || ''}</span>
@@ -1237,7 +1238,10 @@ async function loadPortfolio() {
 async function loadBalance() {
   try {
     const data = await api('/portfolio/balance');
-    document.getElementById('portfolio-balance').textContent = `${fmt(data.balance)} PLN`;
+    const pendingInfo = data.pendingCash > 0
+      ? ` <span style="color:var(--yellow);font-size:0.85em">(${fmt(data.pendingCash)} PLN w rozliczeniu T+2)</span>`
+      : '';
+    document.getElementById('portfolio-balance').innerHTML = `${fmt(data.availableCash || data.balance)} PLN${pendingInfo}`;
   } catch {
     document.getElementById('portfolio-balance').textContent = '— PLN';
   }

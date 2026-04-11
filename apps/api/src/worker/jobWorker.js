@@ -18,9 +18,10 @@ const { query, queryOne, run, saveDb } = require('../db/connection');
 const { ingestIncremental, ingestAll, ingestIntraday5m, getLastCycleStats } = require('../ingest/ingestPipeline');
 const { computeAllFeatures } = require('../ml/featureEngineering');
 const { trainAll, predictAll } = require('../ml/mlEngine');
-const { generateAllSignals } = require('../ml/riskEngine');
+const { generateAllSignals, getCompetitionSellCandidates } = require('../ml/riskEngine');
 const { runScreener, getDailyPicks, saveDailyPicks, validatePastPicks, getPickStats } = require('../screener/rankingService');
 const { trainT1Model, predictTopGainersT1, validateT1Predictions, loadT1Model } = require('../ml/topGainersT1');
+const { settleMaturedTransactions } = require('../portfolio/portfolioService');
 
 const TIMEZONE = 'Europe/Warsaw';
 
@@ -637,6 +638,41 @@ function startScheduler() {
     checkAlerts(); // fire alerts on every drain cycle
     drainQueue().catch(console.error);
   });
+
+  // ========== SETTLEMENT RELEASE (daily 8:30 Mon-Fri) ==========
+  // Settle matured T+2 sell proceeds before market opens.
+  cron.schedule('30 8 * * 1-5', () => {
+    const settled = settleMaturedTransactions();
+    if (settled > 0) {
+      console.log(`[cron:settlement] Released ${settled} matured sell transactions`);
+    }
+  }, { timezone: TIMEZONE });
+
+  // ========== COMPETITION AUTO-EXIT (every 5 min, market hours) ==========
+  // Automatically close competition positions that hit TP, SL, or timeout.
+  cron.schedule('*/5 9-16 * * 1-5', () => {
+    try {
+      const candidates = getCompetitionSellCandidates();
+      const autoSell = candidates.filter(c => c.action === 'SELL');
+      for (const c of autoSell) {
+        run(
+          "UPDATE competition_portfolio SET status = 'closed', exit_price = ?, exit_date = ? WHERE id = ? AND status = 'open'",
+          [c.currentPrice, new Date().toISOString().slice(0, 10), c.positionId]
+        );
+        run(`INSERT INTO audit_log (event_type, entity, entity_id, payload)
+             VALUES ('COMPETITION_AUTO_EXIT', 'competition_portfolio', ?, ?)`,
+          [String(c.positionId), JSON.stringify({
+            ticker: c.ticker, exitPrice: c.currentPrice, pnlPct: c.pnlPct,
+            daysHeld: c.daysHeld, reasons: c.sellReasons,
+          })]
+        );
+        console.log(`[auto-exit] Closed ${c.ticker} @ ${c.currentPrice} (${c.pnlPct > 0 ? '+' : ''}${c.pnlPct}%) — ${c.sellReasons.join(', ')}`);
+      }
+      if (autoSell.length > 0) saveDb();
+    } catch (err) {
+      console.error(`[auto-exit] Error: ${err.message}`);
+    }
+  }, { timezone: TIMEZONE });
 
   console.log('[worker] Scheduler started — market(15m) | off-hours(60m) | night(drain-only)');
 

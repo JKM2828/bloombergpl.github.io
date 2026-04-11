@@ -636,9 +636,11 @@ const COMPETITION_DEFAULTS = {
   budget: 20000,
   maxPositionPct: 1.0,        // competition = concentrated, allow up to 100%
   futuresMaxPct: 0.60,        // futures capped at 60% of budget
-  minConfidence: 0.30,
-  minExpectedReturn: 0.003,
-  minCompositeScore: 25,
+  minConfidence: 0.40,        // offensive: raised from 0.30
+  minExpectedReturn: 0.008,   // offensive: raised from 0.003
+  minCompositeScore: 30,      // offensive: raised from 25
+  maxOpenPositions: 3,        // offensive: concentrate on fewer positions
+  freshnessGateSec: 300,      // 5 min max ranking age for auto-buy during market
 };
 
 /**

@@ -35,7 +35,7 @@ function queryOne(_sql, _params) {
   return _queryOneResult;
 }
 
-function run(_sql, _params) { return 1; }
+function run(_sql, _params) { return { changes: 0 }; }
 function saveDb() {}
 
 module.exports = {
