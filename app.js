@@ -6,7 +6,11 @@ const API = (window.location.hostname === 'localhost' || window.location.hostnam
   ? 'http://localhost:3001/api'
   : '/api';
 
-const PROD_WS_ORIGIN = 'wss://bloomberpl-da6e13c64b4e.herokuapp.com';
+// WebSocket origin: on localhost connect directly, on Vercel connect to Heroku backend
+// (Vercel rewrites only work for HTTP, not WebSocket)
+const PROD_WS_ORIGIN = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'ws://localhost:3001'
+  : 'wss://bloomberpl-da6e13c64b4e.herokuapp.com';
 
 // ---- Navigation ----
 document.querySelectorAll('.nav-btn').forEach((btn) => {
@@ -48,9 +52,37 @@ function esc(str) {
 const API_TIMEOUT_MS = 30000;
 const API_MAX_RETRIES = 3;
 const API_RETRY_BASE_MS = 500;
+const REFRESH_INTERVAL_MS = {
+  market: 60 * 1000,
+  'off-hours': 5 * 60 * 1000,
+  night: 5 * 60 * 1000,
+};
+const MODE_CACHE_TTL_MS = 60 * 1000;
+const PIPELINE_POLL_INTERVAL_MS = 5000;
+const PIPELINE_POLL_TIMEOUT_MS = 8 * 60 * 1000;
+
+const waitMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const workerModeCache = { mode: 'market', ts: 0 };
+
+function withCacheBuster(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}_t=${Date.now()}`;
+}
+
+// Admin API key — persisted in localStorage
+function getAdminKey() { return (localStorage.getItem('gpw_admin_key') || '').trim(); }
+function setAdminKey(k) { localStorage.setItem('gpw_admin_key', (k || '').trim()); }
 
 async function api(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
   const maxRetries = options.retries ?? API_MAX_RETRIES;
+  const {
+    retries: _retries,
+    timeout,
+    cacheBust = true,
+    headers: optionHeaders,
+    ...fetchOptions
+  } = options;
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
@@ -58,12 +90,18 @@ async function api(path, options = {}) {
       await new Promise(r => setTimeout(r, delay));
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeout || API_TIMEOUT_MS);
     try {
-      const res = await fetch(API + path, {
-        headers: { 'Content-Type': 'application/json' },
+      const hdrs = { 'Content-Type': 'application/json' };
+      const key = getAdminKey();
+      if (key) hdrs['X-API-Key'] = key;
+      const requestPath = method === 'GET' && cacheBust ? withCacheBuster(path) : path;
+      const res = await fetch(API + requestPath, {
+        ...fetchOptions,
+        method,
+        headers: { ...hdrs, ...(optionHeaders || {}) },
         signal: controller.signal,
-        ...options,
+        ...(method === 'GET' ? { cache: 'no-store' } : {}),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -73,7 +111,7 @@ async function api(path, options = {}) {
     } catch (err) {
       lastErr = err.name === 'AbortError' ? new Error('Request timeout') : err;
       // Don't retry POST/PUT/DELETE or 4xx client errors
-      if (options.method && options.method !== 'GET') throw lastErr;
+      if (method !== 'GET') throw lastErr;
       if (attempt === maxRetries) break;
       console.warn(`API ${path} attempt ${attempt + 1} failed: ${lastErr.message} — retrying...`);
     } finally {
@@ -110,6 +148,79 @@ async function apiCached(path, ttlMs = 30000) {
   _apiCache[path] = { data, ts: now };
   return data;
 }
+
+function invalidateApiCache(paths = null) {
+  const keys = Object.keys(_apiCache);
+  if (!paths || paths.length === 0) {
+    keys.forEach((k) => delete _apiCache[k]);
+    return;
+  }
+  keys.forEach((k) => {
+    if (paths.some((p) => k === p || k.startsWith(`${p}?`))) {
+      delete _apiCache[k];
+    }
+  });
+}
+
+function refreshRecommendationViews() {
+  loadPredictions();
+  loadSignals();
+  loadScreener();
+  loadDashboard();
+}
+
+async function getWorkerMode(force = false) {
+  const now = Date.now();
+  if (!force && (now - workerModeCache.ts) < MODE_CACHE_TTL_MS && workerModeCache.mode) {
+    return workerModeCache.mode;
+  }
+  try {
+    const worker = await api('/worker/status', { retries: 1, timeout: 10000, cacheBust: true });
+    workerModeCache.mode = worker.currentMode || workerModeCache.mode || 'market';
+    workerModeCache.ts = now;
+  } catch {
+    // Keep last known mode on temporary API errors.
+  }
+  return workerModeCache.mode || 'market';
+}
+
+async function pollPipelineCompletion(previousRunId, statusEl) {
+  const startedAt = Date.now();
+  let observedRunId = null;
+  let lastRun = null;
+
+  while ((Date.now() - startedAt) < PIPELINE_POLL_TIMEOUT_MS) {
+    const [pipelineRes, workerRes] = await Promise.allSettled([
+      api('/pipeline/status', { retries: 1, timeout: 15000, cacheBust: true }),
+      api('/worker/status', { retries: 1, timeout: 15000, cacheBust: true }),
+    ]);
+
+    if (workerRes.status === 'fulfilled' && workerRes.value?.currentMode) {
+      workerModeCache.mode = workerRes.value.currentMode;
+      workerModeCache.ts = Date.now();
+    }
+
+    if (pipelineRes.status === 'fulfilled' && pipelineRes.value?.run) {
+      lastRun = pipelineRes.value.run;
+      if (lastRun.run_id && lastRun.run_id !== previousRunId) {
+        observedRunId = lastRun.run_id;
+      }
+      if (observedRunId && lastRun.run_id === observedRunId && lastRun.finished_at) {
+        return { done: true, run: lastRun };
+      }
+    }
+
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    const runLabel = observedRunId ? `run=${observedRunId}` : 'oczekiwanie na start runu';
+    if (statusEl) {
+      statusEl.innerHTML = `<span style="color:var(--yellow)">⏳ Pipeline w toku (${runLabel}, ${elapsedSec}s)...</span>`;
+    }
+    await waitMs(PIPELINE_POLL_INTERVAL_MS);
+  }
+
+  return { done: false, run: lastRun };
+}
+
 function dirBadge(dir) {
   const cls = dir === 'BUY' ? 'badge-buy' : dir === 'SELL' ? 'badge-sell' : 'badge-hold';
   const label = dir === 'BUY' ? 'KUP' : dir === 'SELL' ? 'SPRZEDAJ' : 'TRZYMAJ';
@@ -142,15 +253,15 @@ async function loadToday() {
     tbody.innerHTML = data.actions.map(a => {
       const actionCls = a.action === 'KUP' ? 'badge-buy' : (a.action === 'TRZYMAJ' ? 'badge-hold' : 'badge-sell');
       return `<tr>
-        <td><strong>${a.ticker}</strong></td>
-        <td>${a.name || '—'}</td>
-        <td>${a.type || '—'}</td>
+        <td><strong>${esc(a.ticker)}</strong></td>
+        <td>${esc(a.name || '—')}</td>
+        <td>${esc(a.type || '—')}</td>
         <td>${a.price != null ? fmt(a.price) : '—'}</td>
-        <td><span class="badge ${actionCls}">${a.action}</span></td>
+        <td><span class="badge ${actionCls}">${esc(a.action)}</span></td>
         <td>${a.confidence != null ? fmt(a.confidence, 1) + '%' : '—'}</td>
         <td class="${pnlClass(a.expectedReturn)}">${a.expectedReturn != null ? fmt(a.expectedReturn, 2) + '%' : '—'}</td>
         <td>${a.rsi != null ? fmt(a.rsi, 1) : '—'}</td>
-        <td style="font-size:0.8em;max-width:300px">${a.reason || '—'}</td>
+        <td style="font-size:0.8em;max-width:300px">${esc(a.reason || '—')}</td>
       </tr>`;
     }).join('');
   } catch (err) {
@@ -167,9 +278,57 @@ async function loadDashboard() {
   loadTop5();
   loadLiveSignals();
   loadSystemStatus();
+  loadMlFreshness();
   loadDashPrediction();
   loadDashSignal();
   loadDashWorker();
+}
+
+async function loadMlFreshness() {
+  const el = document.getElementById('freshness-content');
+  if (!el) return;
+  try {
+    const [statusRes, freshnessRes] = await Promise.allSettled([
+      api('/ml/status'),
+      apiCached('/freshness', 30000),
+    ]);
+    const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
+    const freshness = freshnessRes.status === 'fulfilled' ? freshnessRes.value : null;
+
+    if (!status && !freshness) {
+      el.innerHTML = '<span style="color:var(--red)">Nie można pobrać statusu ML.</span>';
+      return;
+    }
+
+    const parts = [];
+    if (freshness) {
+      const staleColor = freshness.stale > 5 ? 'var(--red)' : freshness.stale > 0 ? 'var(--yellow)' : 'var(--green)';
+      parts.push(`<span>Świeże instrumenty: <strong>${freshness.fresh}/${freshness.total}</strong> | <span style="color:${staleColor}">Nieaktualne: <strong>${freshness.stale}</strong></span></span>`);
+    }
+    if (status) {
+      const tickers = status.tickers || [];
+      const total = tickers.length;
+      const trained = tickers.filter(t => t.hasModel).length;
+      const predicted = tickers.filter(t => t.hasPrediction).length;
+      const trainable = tickers.filter(t => t.trainable).length;
+      const trainPct = total > 0 ? Math.round(trained / total * 100) : 0;
+      const predPct = total > 0 ? Math.round(predicted / total * 100) : 0;
+      const trainColor = trainPct >= 80 ? 'var(--green)' : trainPct >= 50 ? 'var(--yellow)' : 'var(--red)';
+      const predColor = predPct >= 80 ? 'var(--green)' : predPct >= 50 ? 'var(--yellow)' : 'var(--red)';
+
+      parts.push(`<span>Modele: <strong style="color:${trainColor}">${trained}/${total}</strong> (${trainPct}%) | Predykcje: <strong style="color:${predColor}">${predicted}/${total}</strong> (${predPct}%) | Gotowych do treningu: <strong>${trainable}</strong></span>`);
+
+      // Show tickers without models
+      const noModel = tickers.filter(t => !t.hasModel);
+      if (noModel.length > 0 && noModel.length <= 20) {
+        parts.push(`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--yellow)">⚠ Bez modelu (${noModel.length})</summary><div style="margin-top:4px;font-size:0.85em">${noModel.map(t => `${esc(t.ticker)}: ${t.candleCount} świec, ${t.featureCount} cech`).join(' | ')}</div></details>`);
+      }
+    }
+
+    el.innerHTML = parts.join('<br>') || 'Brak danych';
+  } catch {
+    el.innerHTML = '<span style="color:var(--text-muted)">Nie można pobrać statusu ML.</span>';
+  }
 }
 
 async function loadLiveSignals() {
@@ -193,7 +352,8 @@ async function loadLiveSignals() {
         ${coverageWarning}
         <div style="font-size:0.75em;color:var(--text-muted);margin-bottom:8px">
           Reżim: <strong>${picksData.regime}</strong> |
-          Przeskanowano: ${picksData.totalScreened || '—'} |
+          Uniwersum: ${picksData.universeTotal || '—'} |
+          W rankingu: ${picksData.totalScreened || '—'} |
           Przeszło filtry: ${picksData.passedGates || '—'} |
           Min pewność: ${(gates.minConfidence || 0) * 100}% |
           <span style="font-size:0.9em">${picksData.generatedAt || ''}</span>
@@ -203,10 +363,10 @@ async function loadLiveSignals() {
           ${picksData.picks.map(p => `
             <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:10px">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <strong style="font-size:1.1em">${p.ticker}</strong>
+                <strong style="font-size:1.1em">${esc(p.ticker)}</strong>
                 <span class="badge badge-buy">EDGE ${p.edgeScore || '—'}</span>
               </div>
-              <div style="font-size:0.85em;color:var(--text-muted)">${p.name || ''} · ${p.sector || ''}</div>
+              <div style="font-size:0.85em;color:var(--text-muted)">${esc(p.name || '')} · ${esc(p.sector || '')}</div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px;font-size:0.85em">
                 <div>Score: <strong>${fmt(p.compositeScore)}</strong></div>
                 <div>ML: <strong class="positive">${p.ml ? p.ml.confidence + '%' : '—'}</strong></div>
@@ -264,7 +424,7 @@ async function loadTop5() {
     top5El.innerHTML = top5.map((r, i) => `
       <div class="rank-item">
         <span>
-          <span class="ticker">${i + 1}. ${r.ticker}</span> ${r.name}
+          <span class="ticker">${i + 1}. ${esc(r.ticker)}</span> ${esc(r.name)}
           ${(r.lastClose ?? r.metrics?.lastClose) != null ? `<span style="color:var(--text-muted);font-size:0.85em;margin-left:6px">${fmt(r.lastClose ?? r.metrics?.lastClose)} PLN</span>` : ''}
         </span>
         <span class="score positive" title="Score 0-100">${fmt(r.score)} <small style="opacity:0.6">pkt</small></span>
@@ -274,7 +434,7 @@ async function loadTop5() {
     bottom5El.innerHTML = bottom5.map((r, i) => `
       <div class="rank-item">
         <span>
-          <span class="ticker">${r.ticker}</span> ${r.name}
+          <span class="ticker">${esc(r.ticker)}</span> ${esc(r.name)}
           ${(r.lastClose ?? r.metrics?.lastClose) != null ? `<span style="color:var(--text-muted);font-size:0.85em;margin-left:6px">${fmt(r.lastClose ?? r.metrics?.lastClose)} PLN</span>` : ''}
         </span>
         <span class="score negative" title="Score 0-100">${fmt(r.score)} <small style="opacity:0.6">pkt</small></span>
@@ -299,24 +459,43 @@ async function loadSystemStatus() {
     const stooq = (data.providers || []).find((p) => p.provider === 'stooq' || p.provider === 'stooq-json');
     const allDown = (data.providers || []).every(p => !p.ok);
     const limitHint = allDown ? '<p style="color:var(--yellow)">Uwaga: Wszystkie źródła danych chwilowo niedostępne – dashboard pokazuje dane z bazy.</p>' : '';
-    const freshnessLine = freshness
-      ? `<p>Świeżość: <strong>${freshness.fresh}/${freshness.total}</strong> świeżych, <strong>${freshness.stale}</strong> oczekuje na ingest</p>`
+    // Use inline freshness from /health if available, fallback to /freshness endpoint
+    const fr = data.freshness || freshness;
+    const freshnessLine = fr
+      ? `<p>Świeżość: <strong>${fr.fresh}/${fr.total}</strong> świeżych, <strong>${fr.stale}</strong> oczekuje na ingest</p>`
+      : '';
+    const lastIngestAge = data.lastIngestAgeSec != null
+      ? `<span style="color:${data.dataStale ? 'var(--red)' : 'var(--text-muted)'};font-size:0.85em"> (${Math.round(data.lastIngestAgeSec / 3600)}h temu)</span>`
+      : '';
+    const blockersHtml = data.recoveryBlockers && data.recoveryBlockers.length > 0
+      ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--yellow)">⚠ Blokady recovery (${data.recoveryBlockers.length})</summary><ul style="margin:4px 0 0 16px;font-size:0.85em">${data.recoveryBlockers.map(b => `<li>${esc(b)}</li>`).join('')}</ul></details>`
       : '';
     document.getElementById('system-status').innerHTML = `
       <div style="font-size:0.9em">
-        <p>Status: <strong style="color:${statusColor}">${data.status.toUpperCase()}</strong></p>
+        <p>Status: <strong style="color:${statusColor}">${esc(data.status).toUpperCase()}</strong></p>
         <p>Instrumenty: <strong>${data.instruments}</strong></p>
         <p>Świece w bazie: <strong>${data.candles.toLocaleString()}</strong></p>
-        <p>Ostatni ingest: <strong>${data.lastIngest || 'brak'}</strong></p>
+        <p>Ostatni ingest: <strong>${esc(data.lastIngest || 'brak')}</strong>${lastIngestAge}</p>
         ${freshnessLine}
         ${limitHint}
+        ${blockersHtml}
+        ${data.alerts && data.alerts.length > 0 ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--red)">🚨 Alerty (${data.alerts.length})</summary><ul style="margin:4px 0 0 16px;font-size:0.85em">${data.alerts.map(a => `<li style="color:${a.level === 'critical' ? 'var(--red)' : 'var(--yellow)'}">${esc(a.message)}</li>`).join('')}</ul></details>` : ''}
         <p>Providery:</p>
-        ${data.providers.map(p => `
-          <p style="margin-left:12px">
-            <span class="status-dot ${p.ok ? 'status-ok' : 'status-err'}"></span> ${p.provider} ${p.candles ? `(${p.candles} świec)` : ''}
-            ${p.error ? `<span style="color:var(--red)">${p.error}</span>` : ''}
-          </p>
-        `).join('')}
+        ${data.providers.map(p => {
+          const statusLabel = p.status === 'optional_disabled' ? '(wyłączony)'
+            : p.status === 'rate_limited' ? '(limit)'
+            : p.status === 'circuit_open' ? '(przerwa)'
+            : p.status === 'cached' ? '(cache)'
+            : p.status === 'down' ? '(niedostępny)'
+            : '';
+          const statusColor = p.status === 'ok' || p.status === 'cached' ? '' : 'color:var(--yellow)';
+          return `<p style="margin-left:12px">
+            <span class="status-dot ${p.ok ? 'status-ok' : 'status-err'}"></span> ${esc(p.provider)}
+            ${statusLabel ? `<span style="${statusColor};font-size:0.85em"> ${statusLabel}</span>` : ''}
+            ${p.candles ? `<span style="font-size:0.85em"> (${p.candles} świec)</span>` : ''}
+            ${p.error && p.status !== 'optional_disabled' ? `<span style="color:var(--red);font-size:0.85em"> ${esc(p.error)}</span>` : ''}
+          </p>`;
+        }).join('')}
       </div>
     `;
   } catch {
@@ -335,7 +514,7 @@ async function loadDashPrediction() {
     }
     document.getElementById('dash-top-prediction').innerHTML = `
       <div style="font-size:0.9em">
-        <p><strong>${pred.ticker}</strong> ${pred.name || ''}</p>
+        <p><strong>${esc(pred.ticker)}</strong> ${esc(pred.name || '')}</p>
         <p>${dirBadge(pred.predicted_direction)} Pewność: <strong>${fmt(pred.confidence * 100)}%</strong></p>
         <p>Oczekiwany zwrot: <strong class="${pnlClass(pred.predicted_return)}">${fmt(pred.predicted_return * 100)}%</strong></p>
         <div class="scenario-bar">
@@ -359,7 +538,7 @@ async function loadDashSignal() {
     }
     document.getElementById('dash-top-signal').innerHTML = `
       <div style="font-size:0.9em">
-        <p><strong>${sig.ticker}</strong> ${sig.name || ''}</p>
+        <p><strong>${esc(sig.ticker)}</strong> ${esc(sig.name || '')}</p>
         <p>${dirBadge(sig.direction)}</p>
         <p>Ryzyko: ${riskBadge(sig.risk_score > 60 ? 'HIGH' : sig.risk_score > 35 ? 'MEDIUM' : 'LOW')} (${sig.risk_score}/100)</p>
         <p>SL: <span class="negative">${fmt(sig.stop_loss)}</span> | TP: <span class="positive">${fmt(sig.take_profit)}</span></p>
@@ -374,6 +553,10 @@ async function loadDashWorker() {
       api('/worker/status'),
       api('/alerts').catch(() => ({ count: 0, alerts: [], status: 'ok' })),
     ]);
+    if (data.currentMode) {
+      workerModeCache.mode = data.currentMode;
+      workerModeCache.ts = Date.now();
+    }
     const run = data.lastPipelineRun;
     const isCrisis = run?.status === 'crisis';
     const runInfo = run
@@ -390,12 +573,12 @@ async function loadDashWorker() {
       ? `<span style="color:${ingestAge > 30 ? 'var(--red)' : ingestAge > 10 ? 'var(--yellow)' : 'var(--green)'}">${ingestAge} min temu</span>`
       : '<span style="color:var(--red)">brak</span>';
     const alertBanner = alertData.count > 0
-      ? `<div style="background:${alertData.status === 'critical' ? 'var(--red)' : 'var(--yellow)'};color:${alertData.status === 'critical' ? '#fff' : '#000'};padding:4px 8px;border-radius:4px;margin-top:6px;font-size:0.8em">⚠ ${alertData.count} alert${alertData.count > 1 ? 'y' : ''}: ${alertData.alerts.map(a => a.message).join('; ')}</div>`
+      ? `<div style="background:${alertData.status === 'critical' ? 'var(--red)' : 'var(--yellow)'};color:${alertData.status === 'critical' ? '#fff' : '#000'};padding:4px 8px;border-radius:4px;margin-top:6px;font-size:0.8em">⚠ ${alertData.count} alert${alertData.count > 1 ? 'y' : ''}: ${alertData.alerts.map(a => esc(a.message)).join('; ')}</div>`
       : '';
     document.getElementById('dash-worker-status').innerHTML = `
       <div style="font-size:0.9em">
         <p>Status: <strong style="color:${data.isRunning ? 'var(--green)' : 'var(--red)'}">${data.isRunning ? 'Aktywny' : 'Zatrzymany'}</strong>
-           | Tryb: <strong>${data.currentMode || '—'}</strong></p>
+           | Tryb: <strong>${esc(data.currentMode || '—')}</strong></p>
         <p>Kolejka: <strong>${data.queueSize}</strong> | Przetworzono: <strong>${data.jobsProcessed}</strong> | Błędy: <strong>${data.jobsFailed || 0}</strong></p>
         <p>Ostatni ingest: ${ingestLabel}</p>
         ${runInfo}
@@ -423,14 +606,14 @@ function renderInstrumentsTable(instruments) {
   const tbody = document.querySelector('#instruments-table tbody');
   tbody.innerHTML = instruments.map((inst) => `
     <tr>
-      <td><strong>${inst.ticker}</strong></td>
-      <td>${inst.name}</td>
-      <td>${inst.sector || '—'}</td>
-      <td><span class="filter-btn" style="pointer-events:none;padding:2px 8px;font-size:0.8em">${inst.type}</span></td>
+      <td><strong>${esc(inst.ticker)}</strong></td>
+      <td>${esc(inst.name)}</td>
+      <td>${esc(inst.sector || '—')}</td>
+      <td><span class="filter-btn" style="pointer-events:none;padding:2px 8px;font-size:0.8em">${esc(inst.type)}</span></td>
       <td><strong>${inst.lastClose != null ? fmt(inst.lastClose) + ' <span style="color:var(--text-muted);font-size:0.85em">PLN</span>' : '—'}</strong></td>
       <td>
-        <button class="btn-sm" onclick="showChart('${inst.ticker}')">Chart</button>
-        <button class="btn-sm" onclick="showPrediction('${inst.ticker}')">AI</button>
+        <button class="btn-sm" onclick="showChart('${esc(inst.ticker)}')">Chart</button>
+        <button class="btn-sm" onclick="showPrediction('${esc(inst.ticker)}')">AI</button>
       </td>
     </tr>
   `).join('');
@@ -483,8 +666,8 @@ async function loadPredictions() {
     tbody.innerHTML = predictions.map((p, i) => `
       <tr>
         <td>${i + 1}</td>
-        <td><strong>${p.ticker}</strong> <span style="color:var(--text-muted);font-size:0.75em">${p.type || ''}</span></td>
-        <td>${p.name || ''}</td>
+        <td><strong>${esc(p.ticker)}</strong> <span style="color:var(--text-muted);font-size:0.75em">${esc(p.type || '')}</span></td>
+        <td>${esc(p.name || '')}</td>
         <td><strong>${p.lastClose != null ? fmt(p.lastClose) + ' <span style="color:var(--text-muted);font-size:0.8em">PLN</span>' : '—'}</strong></td>
         <td>${dirBadge(p.predicted_direction)}</td>
         <td>${fmt(p.confidence * 100)}%</td>
@@ -497,7 +680,7 @@ async function loadPredictions() {
         <td class="negative"><strong>${p.targetPriceBear != null ? fmt(p.targetPriceBear) + ' PLN' : '—'}</strong></td>
         <td>${fmt(p.rsi || null)}</td>
         <td class="${pnlClass(p.macd_hist)}">${fmt(p.macd_hist || null, 3)}</td>
-        <td>${p.regime || '—'}</td>
+        <td>${esc(p.regime || '—')}</td>
       </tr>
     `).join('');
   } catch (err) {
@@ -513,14 +696,43 @@ function showPrediction(ticker) {
   loadPredictions();
 }
 
+// Admin API key — save/load from localStorage
+(function initAdminKey() {
+  const inp = document.getElementById('admin-key-input');
+  const saved = getAdminKey();
+  if (saved && inp) inp.value = saved;
+  const btn = document.getElementById('btn-save-key');
+  if (btn) btn.addEventListener('click', () => {
+    setAdminKey(inp.value);
+    const st = document.getElementById('prediction-status');
+    if (st) st.innerHTML = inp.value
+      ? '<span style="color:var(--green)">🔑 Klucz zapisany.</span>'
+      : '<span style="color:var(--yellow)">🔑 Klucz usunięty.</span>';
+  });
+})();
+
 // Prediction action buttons
 document.getElementById('btn-run-pipeline').addEventListener('click', debounceBtn(document.getElementById('btn-run-pipeline'), async () => {
   const el = document.getElementById('prediction-status');
-  el.innerHTML = '<span style="color:var(--yellow)">Uruchamiam pełny pipeline...</span>';
+  el.innerHTML = '<span style="color:var(--yellow)">⏳ Uruchamiam pełny pipeline (ingest → features → train → predykcje → ranking)...</span>';
   try {
+    const baseline = await api('/pipeline/status', { retries: 1, timeout: 10000, cacheBust: true }).catch(() => ({ run: null }));
+    const previousRunId = baseline?.run?.run_id || null;
     const data = await api('/pipeline/run', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">Pipeline gotowy! ${data.jobsProcessed} zadań przetworzonych.</span>`;
-    loadPredictions();
+    el.innerHTML = `<span style="color:var(--yellow)">⏳ ${esc(data.message || 'Pipeline queued')} — monitoruję status uruchomienia...</span>`;
+
+    const poll = await pollPipelineCompletion(previousRunId, el);
+    invalidateApiCache();
+    refreshRecommendationViews();
+
+    if (poll.done) {
+      const run = poll.run || {};
+      const degradedLabel = run.degraded ? ' (degraded)' : '';
+      const coverageLabel = run.coverage_pct != null ? ` | pokrycie ${run.coverage_pct}%` : '';
+      el.innerHTML = `<span style="color:var(--green)">✅ Pipeline zakończony: ${esc(run.status || 'completed')}${degradedLabel}${coverageLabel}.</span>`;
+    } else {
+      el.innerHTML = '<span style="color:var(--yellow)">⏳ Pipeline nadal trwa. Widoki będą odświeżane automatycznie.</span>';
+    }
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
   }
@@ -528,11 +740,14 @@ document.getElementById('btn-run-pipeline').addEventListener('click', debounceBt
 
 document.getElementById('btn-run-predictions').addEventListener('click', debounceBtn(document.getElementById('btn-run-predictions'), async () => {
   const el = document.getElementById('prediction-status');
-  el.innerHTML = '<span style="color:var(--yellow)">Generuję predykcje...</span>';
+  el.innerHTML = '<span style="color:var(--yellow)">⏳ Generuję predykcje...</span>';
   try {
     const data = await api('/predictions/run', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">${data.predictionsCount} predykcji, ${data.signalsCount} sygnałów.</span>`;
+    el.innerHTML = `<span style="color:var(--green)">✅ ${data.predictionsCount} predykcji, ${data.signalsCount} sygnałów.</span>`;
+    invalidateApiCache();
     loadPredictions();
+    loadSignals();
+    loadDashboard();
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
@@ -540,10 +755,16 @@ document.getElementById('btn-run-predictions').addEventListener('click', debounc
 
 document.getElementById('btn-train-models').addEventListener('click', debounceBtn(document.getElementById('btn-train-models'), async () => {
   const el = document.getElementById('prediction-status');
-  el.innerHTML = '<span style="color:var(--yellow)">Trenuję modele neuronowe... to może potrwać.</span>';
+  el.innerHTML = '<span style="color:var(--yellow)">⏳ Trenuję modele + synchronizuję predykcje i ranking... to może potrwać.</span>';
   try {
-    const data = await api('/ml/train', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">Wytrenowano ${data.models} modeli.</span>`;
+    const data = await api('/ml/train', { method: 'POST', timeout: 120000 });
+    const skippedCount = data.skippedTickers ? data.skippedTickers.length : 0;
+    el.innerHTML = `<span style="color:var(--green)">✅ Wytrenowano ${data.models} modeli → ${data.predictions || 0} predykcji → ${data.ranked || 0} w rankingu.`
+      + (skippedCount > 0 ? ` <span style="color:var(--yellow)">(${skippedCount} pominiętych — za mało danych)</span>` : '')
+      + `</span>`;
+    // Auto-refresh all views with fresh data
+    invalidateApiCache();
+    refreshRecommendationViews();
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
@@ -566,7 +787,7 @@ async function loadSignals() {
     tbody.innerHTML = signals.map((s, i) => `
       <tr>
         <td>${i + 1}</td>
-        <td><strong>${s.ticker}</strong> <span style="color:var(--text-muted);font-size:0.8em">${s.name || ''}</span></td>
+        <td><strong>${esc(s.ticker)}</strong> <span style="color:var(--text-muted);font-size:0.8em">${esc(s.name || '')}</span></td>
         <td><strong>${s.lastClose != null ? fmt(s.lastClose) + ' <span style="color:var(--text-muted);font-size:0.8em">PLN</span>' : '—'}</strong></td>
         <td>${dirBadge(s.direction)}</td>
         <td>${fmt(s.confidence * 100)}%</td>
@@ -576,8 +797,8 @@ async function loadSignals() {
         <td class="negative">${fmt(s.stop_loss)}</td>
         <td class="positive">${fmt(s.take_profit)}</td>
         <td>${s.hold_days || '—'} dni</td>
-        <td style="font-size:0.75em">${s.model_version || '—'}</td>
-        <td style="font-size:0.75em">${s.created_at || ''}</td>
+        <td style="font-size:0.75em">${esc(s.model_version || '—')}</td>
+        <td style="font-size:0.75em">${esc(s.created_at || '')}</td>
       </tr>
     `).join('');
   } catch (err) {
@@ -606,9 +827,9 @@ async function loadScreener() {
       return `
         <tr>
           <td>${i + 1}</td>
-          <td><strong>${r.ticker}</strong></td>
-          <td>${r.name}</td>
-          <td>${r.type}</td>
+          <td><strong>${esc(r.ticker)}</strong></td>
+          <td>${esc(r.name)}</td>
+          <td>${esc(r.type)}</td>
           <td><strong>${price != null ? fmt(price) + ' <span style="color:var(--text-muted);font-size:0.8em">PLN</span>' : '—'}</strong></td>
           <td><strong class="${pnlClass(r.score - 50)}">${fmt(r.score)}</strong></td>
           <td class="${pnlClass(m.perf1M)}">${fmt(m.perf1M)}%</td>
@@ -616,7 +837,7 @@ async function loadScreener() {
           <td>${fmt(m.rsi)}</td>
           <td>${fmt(m.volatility)}%</td>
           <td class="negative">${fmt(m.maxDrawdown)}%</td>
-          <td style="font-size:0.85em">${r.reason || '—'}</td>
+          <td style="font-size:0.85em">${esc(r.reason || '—')}</td>
         </tr>
       `;
     }).join('');
@@ -632,7 +853,9 @@ document.getElementById('btn-run-screener').addEventListener('click', debounceBt
   try {
     const data = await api('/ranking/run', { method: 'POST' });
     statusEl.textContent = `Ranking gotowy – ${data.count} instrumentów`;
+    invalidateApiCache();
     loadScreener();
+    loadDashboard();
   } catch (err) {
     statusEl.textContent = `Błąd: ${err.message}`;
   }
@@ -1098,12 +1321,12 @@ async function loadWorker() {
       tbody.innerHTML = jobs.map(j => `
         <tr>
           <td>${j.id}</td>
-          <td><strong>${j.job_type}</strong></td>
-          <td class="job-${j.status}">${j.status}</td>
-          <td style="font-size:0.8em">${j.created_at}</td>
-          <td style="font-size:0.8em">${j.finished_at || '—'}</td>
+          <td><strong>${esc(j.job_type)}</strong></td>
+          <td class="job-${esc(j.status)}">${esc(j.status)}</td>
+          <td style="font-size:0.8em">${esc(j.created_at)}</td>
+          <td style="font-size:0.8em">${esc(j.finished_at) || '—'}</td>
           <td>${j.retries}</td>
-          <td style="font-size:0.8em;color:var(--red)">${j.error || ''}</td>
+          <td style="font-size:0.8em;color:var(--red)">${esc(j.error || '')}</td>
         </tr>
       `).join('');
     }
@@ -1139,7 +1362,7 @@ document.getElementById('btn-drain-queue').addEventListener('click', debounceBtn
   el.innerHTML = '<span style="color:var(--yellow)">Przetwarzam kolejkę...</span>';
   try {
     const data = await api('/worker/drain', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">${data.message}</span>`;
+    el.innerHTML = `<span style="color:var(--green)">${esc(data.message)}</span>`;
     loadWorker();
   } catch (err) { el.innerHTML = `<span class="negative">${esc(err.message)}</span>`; }
 }));
@@ -1156,7 +1379,10 @@ async function loadPortfolio() {
 async function loadBalance() {
   try {
     const data = await api('/portfolio/balance');
-    document.getElementById('portfolio-balance').textContent = `${fmt(data.balance)} PLN`;
+    const pendingInfo = data.pendingCash > 0
+      ? ` <span style="color:var(--yellow);font-size:0.85em">(${fmt(data.pendingCash)} PLN w rozliczeniu T+2)</span>`
+      : '';
+    document.getElementById('portfolio-balance').innerHTML = `${fmt(data.availableCash || data.balance)} PLN${pendingInfo}`;
   } catch {
     document.getElementById('portfolio-balance').textContent = '— PLN';
   }
@@ -1179,7 +1405,7 @@ async function loadPositions() {
       totalPnl += p.pnl;
       return `
         <tr>
-          <td><strong>${p.ticker}</strong></td>
+          <td><strong>${esc(p.ticker)}</strong></td>
           <td>${p.shares}</td>
           <td>${fmt(p.avgPrice)}</td>
           <td>${fmt(p.currentPrice)}</td>
@@ -1211,9 +1437,9 @@ async function loadTransactions() {
 
     tbody.innerHTML = txns.map((t) => `
       <tr>
-        <td>${t.created_at}</td>
-        <td>${t.type}</td>
-        <td>${t.ticker || '—'}</td>
+        <td>${esc(t.created_at)}</td>
+        <td>${esc(t.type)}</td>
+        <td>${esc(t.ticker || '—')}</td>
         <td>${t.shares || '—'}</td>
         <td>${t.price ? fmt(t.price) : '—'}</td>
         <td>${fmt(t.amount)} PLN</td>
@@ -1298,9 +1524,9 @@ async function loadIngestLogs() {
       : logs.map((l) => `
         <div style="padding:4px 0;border-bottom:1px solid var(--border)">
           <span class="status-dot ${l.status === 'ok' ? 'status-ok' : 'status-err'}"></span>
-          <strong>${l.ticker}</strong> (${l.provider}) – ${l.rows_inserted} nowych
-          <span style="color:var(--text-muted);margin-left:8px">${l.created_at}</span>
-          ${l.status === 'error' ? `<br><span style="color:var(--red)">${l.message}</span>` : ''}
+          <strong>${esc(l.ticker)}</strong> (${esc(l.provider)}) – ${l.rows_inserted} nowych
+          <span style="color:var(--text-muted);margin-left:8px">${esc(l.created_at)}</span>
+          ${l.status === 'error' ? `<br><span style="color:var(--red)">${esc(l.message)}</span>` : ''}
         </div>
       `).join('');
   } catch { /* ignore */ }
@@ -1317,8 +1543,8 @@ async function loadAuditLogs() {
     }
     el.innerHTML = logs.map(l => `
       <div style="padding:4px 0;border-bottom:1px solid var(--border)">
-        <strong>${l.event_type}</strong> [${l.entity}:${l.entity_id}]
-        <span style="color:var(--text-muted);margin-left:8px">${l.created_at}</span>
+        <strong>${esc(l.event_type)}</strong> [${esc(l.entity)}:${esc(l.entity_id)}]
+        <span style="color:var(--text-muted);margin-left:8px">${esc(l.created_at)}</span>
       </div>
     `).join('');
   } catch { /* ignore */ }
@@ -1460,9 +1686,9 @@ async function loadCompetitionDecision() {
         const a = p.allocation || {};
         return `<tr${p.rank === 1 ? ' style="background:rgba(63,185,80,0.08)"' : ''}>
           <td><strong>${p.rank === 1 ? '★ ' : ''}${p.rank}</strong></td>
-          <td><strong>${p.ticker}</strong></td>
-          <td>${p.name || '—'}</td>
-          <td>${p.type}</td>
+          <td><strong>${esc(p.ticker)}</strong></td>
+          <td>${esc(p.name || '—')}</td>
+          <td>${esc(p.type)}</td>
           <td><strong>${fmt(p.compositeScore)}</strong></td>
           <td>${p.edgeScore || '—'}</td>
           <td class="positive">${p.ml ? p.ml.confidence + '%' : '—'}</td>
@@ -1535,14 +1761,14 @@ async function loadCompetitionPortfolio() {
     }
     tbody.innerHTML = data.positions.map(p => `
       <tr>
-        <td><strong>${p.ticker}</strong></td>
+        <td><strong>${esc(p.ticker)}</strong></td>
         <td>${p.shares}</td>
         <td>${fmt(p.entry_price)}</td>
         <td>${fmt(p.currentPrice)}</td>
         <td>${fmt(p.marketValue)}</td>
         <td class="${pnlClass(p.pnlPct)}"><strong>${fmt(p.pnlPct)}%</strong></td>
         <td>${p.entry_date || '—'}</td>
-        <td><button class="btn-sm btn-danger" onclick="compSellPosition(${p.id}, '${p.ticker}', ${p.currentPrice})">Sprzedaj</button></td>
+        <td><button class="btn-sm btn-danger" onclick="compSellPosition(${Number(p.id)}, '${esc(p.ticker)}', ${Number(p.currentPrice)})">Sprzedaj</button></td>
       </tr>
     `).join('');
   } catch {
@@ -1563,14 +1789,14 @@ async function loadCompetitionSellCandidates() {
       const actionCls = c.action === 'SELL' ? 'badge-sell' : c.action === 'PARTIAL_SELL' ? 'badge-hold' : 'badge-hold';
       const actionLabel = c.action === 'SELL' ? 'SPRZEDAJ' : c.action === 'PARTIAL_SELL' ? 'CZĘŚCIOWO' : 'ROZWAŻ';
       return `<tr>
-        <td><strong>${c.ticker}</strong></td>
+        <td><strong>${esc(c.ticker)}</strong></td>
         <td>${c.shares}</td>
         <td>${fmt(c.entryPrice)}</td>
         <td>${fmt(c.currentPrice)}</td>
         <td class="${pnlClass(c.pnlPct)}"><strong>${fmt(c.pnlPct)}%</strong></td>
         <td>${c.daysHeld}d</td>
         <td><span class="badge ${actionCls}">${actionLabel}</span></td>
-        <td style="font-size:0.8em">${c.sellReasons.join('; ')}</td>
+        <td style="font-size:0.8em">${esc(c.sellReasons.join('; '))}</td>
       </tr>`;
     }).join('');
   } catch {
@@ -1599,7 +1825,7 @@ async function loadCompetitionHistory() {
     tbody.innerHTML = closed.map(t => {
       const pnlPct = t.entry_price > 0 ? ((t.exit_price - t.entry_price) / t.entry_price * 100) : 0;
       return `<tr>
-        <td><strong>${t.ticker}</strong></td>
+        <td><strong>${esc(t.ticker)}</strong></td>
         <td>${t.shares}</td>
         <td>${fmt(t.entry_price)}</td>
         <td>${fmt(t.exit_price)}</td>
@@ -1656,22 +1882,54 @@ document.getElementById('btn-comp-auto-buy').addEventListener('click', async () 
 });
 
 // ============================================================
-// AUTO-REFRESH (every 60s for dashboard, every 5min for chart)
+// AUTO-REFRESH (market: 60s, off-hours/night: 5min)
 // ============================================================
-setInterval(() => {
+let lastAutoRefreshTs = 0;
+async function autoRefreshActiveView() {
   const activeView = document.querySelector('.view.active');
-  if (activeView?.id === 'view-dashboard') {
-    loadTop5();
-    loadLiveSignals();
-    loadDashPrediction();
-    loadDashSignal();
-    loadDashWorker();
-    loadInstrumentsTable();
-  } else if (activeView?.id === 'view-today') {
-    loadToday();
-  } else if (activeView?.id === 'view-competition') {
-    loadCompetition();
+  if (!activeView) return;
+
+  const mode = await getWorkerMode();
+  const minInterval = REFRESH_INTERVAL_MS[mode] || REFRESH_INTERVAL_MS.market;
+  const now = Date.now();
+  if ((now - lastAutoRefreshTs) < minInterval) return;
+  lastAutoRefreshTs = now;
+
+  switch (activeView.id) {
+    case 'view-dashboard':
+      loadTop5();
+      loadLiveSignals();
+      loadDashPrediction();
+      loadDashSignal();
+      loadDashWorker();
+      loadInstrumentsTable();
+      break;
+    case 'view-predictions':
+      loadPredictions();
+      break;
+    case 'view-signals':
+      loadSignals();
+      break;
+    case 'view-screener':
+      loadScreener();
+      break;
+    case 'view-today':
+      loadToday();
+      break;
+    case 'view-competition':
+      loadCompetition();
+      break;
+    case 'view-worker':
+      loadWorker();
+      break;
+    case 'view-health':
+      loadHealth();
+      break;
   }
+}
+
+setInterval(() => {
+  autoRefreshActiveView().catch((err) => console.warn('[auto-refresh]', err.message));
 }, 60000);
 
 // Chart auto-refresh every 5 min for non-live timeframes (reloads candles for current ticker)
