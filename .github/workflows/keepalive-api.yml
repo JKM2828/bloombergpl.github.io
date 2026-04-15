@@ -1,0 +1,33 @@
+name: API Keepalive Ping
+
+on:
+  schedule:
+    # Market window (Warsaw 9-17, approx UTC 7-15): keep process warm every 5 minutes.
+    - cron: '*/5 7-15 * * 1-5'
+    # Off-hours fallback: keep warm with low frequency.
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping keepalive endpoint
+        env:
+          API_BASE_URL: ${{ secrets.HEROKU_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+          BASE_URL="${API_BASE_URL:-https://bloomberpl-da6e13c64b4e.herokuapp.com}"
+          KEEPALIVE_URL="${BASE_URL%/}/keepalive"
+
+          echo "Pinging ${KEEPALIVE_URL}"
+          HTTP_CODE=$(curl -sS -o /tmp/keepalive-response.json -w "%{http_code}" "${KEEPALIVE_URL}")
+
+          echo "HTTP ${HTTP_CODE}"
+          cat /tmp/keepalive-response.json || true
+
+          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+            echo "Keepalive ping failed"
+            exit 1
+          fi

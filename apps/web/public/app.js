@@ -52,13 +52,37 @@ function esc(str) {
 const API_TIMEOUT_MS = 30000;
 const API_MAX_RETRIES = 3;
 const API_RETRY_BASE_MS = 500;
+const REFRESH_INTERVAL_MS = {
+  market: 60 * 1000,
+  'off-hours': 5 * 60 * 1000,
+  night: 5 * 60 * 1000,
+};
+const MODE_CACHE_TTL_MS = 60 * 1000;
+const PIPELINE_POLL_INTERVAL_MS = 5000;
+const PIPELINE_POLL_TIMEOUT_MS = 8 * 60 * 1000;
+
+const waitMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const workerModeCache = { mode: 'market', ts: 0 };
+
+function withCacheBuster(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}_t=${Date.now()}`;
+}
 
 // Admin API key — persisted in localStorage
 function getAdminKey() { return (localStorage.getItem('gpw_admin_key') || '').trim(); }
 function setAdminKey(k) { localStorage.setItem('gpw_admin_key', (k || '').trim()); }
 
 async function api(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
   const maxRetries = options.retries ?? API_MAX_RETRIES;
+  const {
+    retries: _retries,
+    timeout,
+    cacheBust = true,
+    headers: optionHeaders,
+    ...fetchOptions
+  } = options;
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
@@ -66,15 +90,18 @@ async function api(path, options = {}) {
       await new Promise(r => setTimeout(r, delay));
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeout || API_TIMEOUT_MS);
     try {
       const hdrs = { 'Content-Type': 'application/json' };
       const key = getAdminKey();
       if (key) hdrs['X-API-Key'] = key;
-      const res = await fetch(API + path, {
-        headers: hdrs,
+      const requestPath = method === 'GET' && cacheBust ? withCacheBuster(path) : path;
+      const res = await fetch(API + requestPath, {
+        ...fetchOptions,
+        method,
+        headers: { ...hdrs, ...(optionHeaders || {}) },
         signal: controller.signal,
-        ...options,
+        ...(method === 'GET' ? { cache: 'no-store' } : {}),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -84,7 +111,7 @@ async function api(path, options = {}) {
     } catch (err) {
       lastErr = err.name === 'AbortError' ? new Error('Request timeout') : err;
       // Don't retry POST/PUT/DELETE or 4xx client errors
-      if (options.method && options.method !== 'GET') throw lastErr;
+      if (method !== 'GET') throw lastErr;
       if (attempt === maxRetries) break;
       console.warn(`API ${path} attempt ${attempt + 1} failed: ${lastErr.message} — retrying...`);
     } finally {
@@ -121,6 +148,79 @@ async function apiCached(path, ttlMs = 30000) {
   _apiCache[path] = { data, ts: now };
   return data;
 }
+
+function invalidateApiCache(paths = null) {
+  const keys = Object.keys(_apiCache);
+  if (!paths || paths.length === 0) {
+    keys.forEach((k) => delete _apiCache[k]);
+    return;
+  }
+  keys.forEach((k) => {
+    if (paths.some((p) => k === p || k.startsWith(`${p}?`))) {
+      delete _apiCache[k];
+    }
+  });
+}
+
+function refreshRecommendationViews() {
+  loadPredictions();
+  loadSignals();
+  loadScreener();
+  loadDashboard();
+}
+
+async function getWorkerMode(force = false) {
+  const now = Date.now();
+  if (!force && (now - workerModeCache.ts) < MODE_CACHE_TTL_MS && workerModeCache.mode) {
+    return workerModeCache.mode;
+  }
+  try {
+    const worker = await api('/worker/status', { retries: 1, timeout: 10000, cacheBust: true });
+    workerModeCache.mode = worker.currentMode || workerModeCache.mode || 'market';
+    workerModeCache.ts = now;
+  } catch {
+    // Keep last known mode on temporary API errors.
+  }
+  return workerModeCache.mode || 'market';
+}
+
+async function pollPipelineCompletion(previousRunId, statusEl) {
+  const startedAt = Date.now();
+  let observedRunId = null;
+  let lastRun = null;
+
+  while ((Date.now() - startedAt) < PIPELINE_POLL_TIMEOUT_MS) {
+    const [pipelineRes, workerRes] = await Promise.allSettled([
+      api('/pipeline/status', { retries: 1, timeout: 15000, cacheBust: true }),
+      api('/worker/status', { retries: 1, timeout: 15000, cacheBust: true }),
+    ]);
+
+    if (workerRes.status === 'fulfilled' && workerRes.value?.currentMode) {
+      workerModeCache.mode = workerRes.value.currentMode;
+      workerModeCache.ts = Date.now();
+    }
+
+    if (pipelineRes.status === 'fulfilled' && pipelineRes.value?.run) {
+      lastRun = pipelineRes.value.run;
+      if (lastRun.run_id && lastRun.run_id !== previousRunId) {
+        observedRunId = lastRun.run_id;
+      }
+      if (observedRunId && lastRun.run_id === observedRunId && lastRun.finished_at) {
+        return { done: true, run: lastRun };
+      }
+    }
+
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    const runLabel = observedRunId ? `run=${observedRunId}` : 'oczekiwanie na start runu';
+    if (statusEl) {
+      statusEl.innerHTML = `<span style="color:var(--yellow)">⏳ Pipeline w toku (${runLabel}, ${elapsedSec}s)...</span>`;
+    }
+    await waitMs(PIPELINE_POLL_INTERVAL_MS);
+  }
+
+  return { done: false, run: lastRun };
+}
+
 function dirBadge(dir) {
   const cls = dir === 'BUY' ? 'badge-buy' : dir === 'SELL' ? 'badge-sell' : 'badge-hold';
   const label = dir === 'BUY' ? 'KUP' : dir === 'SELL' ? 'SPRZEDAJ' : 'TRZYMAJ';
@@ -453,6 +553,10 @@ async function loadDashWorker() {
       api('/worker/status'),
       api('/alerts').catch(() => ({ count: 0, alerts: [], status: 'ok' })),
     ]);
+    if (data.currentMode) {
+      workerModeCache.mode = data.currentMode;
+      workerModeCache.ts = Date.now();
+    }
     const run = data.lastPipelineRun;
     const isCrisis = run?.status === 'crisis';
     const runInfo = run
@@ -612,12 +716,23 @@ document.getElementById('btn-run-pipeline').addEventListener('click', debounceBt
   const el = document.getElementById('prediction-status');
   el.innerHTML = '<span style="color:var(--yellow)">⏳ Uruchamiam pełny pipeline (ingest → features → train → predykcje → ranking)...</span>';
   try {
+    const baseline = await api('/pipeline/status', { retries: 1, timeout: 10000, cacheBust: true }).catch(() => ({ run: null }));
+    const previousRunId = baseline?.run?.run_id || null;
     const data = await api('/pipeline/run', { method: 'POST' });
-    el.innerHTML = `<span style="color:var(--green)">✅ ${esc(data.message || 'Pipeline queued')} — dane odświeżą się automatycznie.</span>`;
-    // Poll for completion and refresh
-    setTimeout(() => { loadPredictions(); loadDashboard(); }, 5000);
-    setTimeout(() => { loadPredictions(); loadDashboard(); }, 15000);
-    setTimeout(() => { loadPredictions(); loadDashboard(); }, 30000);
+    el.innerHTML = `<span style="color:var(--yellow)">⏳ ${esc(data.message || 'Pipeline queued')} — monitoruję status uruchomienia...</span>`;
+
+    const poll = await pollPipelineCompletion(previousRunId, el);
+    invalidateApiCache();
+    refreshRecommendationViews();
+
+    if (poll.done) {
+      const run = poll.run || {};
+      const degradedLabel = run.degraded ? ' (degraded)' : '';
+      const coverageLabel = run.coverage_pct != null ? ` | pokrycie ${run.coverage_pct}%` : '';
+      el.innerHTML = `<span style="color:var(--green)">✅ Pipeline zakończony: ${esc(run.status || 'completed')}${degradedLabel}${coverageLabel}.</span>`;
+    } else {
+      el.innerHTML = '<span style="color:var(--yellow)">⏳ Pipeline nadal trwa. Widoki będą odświeżane automatycznie.</span>';
+    }
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">Błąd: ${esc(err.message)}</span>`;
   }
@@ -629,7 +744,9 @@ document.getElementById('btn-run-predictions').addEventListener('click', debounc
   try {
     const data = await api('/predictions/run', { method: 'POST' });
     el.innerHTML = `<span style="color:var(--green)">✅ ${data.predictionsCount} predykcji, ${data.signalsCount} sygnałów.</span>`;
+    invalidateApiCache();
     loadPredictions();
+    loadSignals();
     loadDashboard();
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
@@ -646,8 +763,8 @@ document.getElementById('btn-train-models').addEventListener('click', debounceBt
       + (skippedCount > 0 ? ` <span style="color:var(--yellow)">(${skippedCount} pominiętych — za mało danych)</span>` : '')
       + `</span>`;
     // Auto-refresh all views with fresh data
-    loadPredictions();
-    loadDashboard();
+    invalidateApiCache();
+    refreshRecommendationViews();
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
   }
@@ -736,7 +853,9 @@ document.getElementById('btn-run-screener').addEventListener('click', debounceBt
   try {
     const data = await api('/ranking/run', { method: 'POST' });
     statusEl.textContent = `Ranking gotowy – ${data.count} instrumentów`;
+    invalidateApiCache();
     loadScreener();
+    loadDashboard();
   } catch (err) {
     statusEl.textContent = `Błąd: ${err.message}`;
   }
@@ -1763,22 +1882,54 @@ document.getElementById('btn-comp-auto-buy').addEventListener('click', async () 
 });
 
 // ============================================================
-// AUTO-REFRESH (every 60s for dashboard, every 5min for chart)
+// AUTO-REFRESH (market: 60s, off-hours/night: 5min)
 // ============================================================
-setInterval(() => {
+let lastAutoRefreshTs = 0;
+async function autoRefreshActiveView() {
   const activeView = document.querySelector('.view.active');
-  if (activeView?.id === 'view-dashboard') {
-    loadTop5();
-    loadLiveSignals();
-    loadDashPrediction();
-    loadDashSignal();
-    loadDashWorker();
-    loadInstrumentsTable();
-  } else if (activeView?.id === 'view-today') {
-    loadToday();
-  } else if (activeView?.id === 'view-competition') {
-    loadCompetition();
+  if (!activeView) return;
+
+  const mode = await getWorkerMode();
+  const minInterval = REFRESH_INTERVAL_MS[mode] || REFRESH_INTERVAL_MS.market;
+  const now = Date.now();
+  if ((now - lastAutoRefreshTs) < minInterval) return;
+  lastAutoRefreshTs = now;
+
+  switch (activeView.id) {
+    case 'view-dashboard':
+      loadTop5();
+      loadLiveSignals();
+      loadDashPrediction();
+      loadDashSignal();
+      loadDashWorker();
+      loadInstrumentsTable();
+      break;
+    case 'view-predictions':
+      loadPredictions();
+      break;
+    case 'view-signals':
+      loadSignals();
+      break;
+    case 'view-screener':
+      loadScreener();
+      break;
+    case 'view-today':
+      loadToday();
+      break;
+    case 'view-competition':
+      loadCompetition();
+      break;
+    case 'view-worker':
+      loadWorker();
+      break;
+    case 'view-health':
+      loadHealth();
+      break;
   }
+}
+
+setInterval(() => {
+  autoRefreshActiveView().catch((err) => console.warn('[auto-refresh]', err.message));
 }, 60000);
 
 // Chart auto-refresh every 5 min for non-live timeframes (reloads candles for current ticker)

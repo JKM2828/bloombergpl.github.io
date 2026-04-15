@@ -71,9 +71,25 @@ jobs:
                   console.log(d.ticker, ':', d.daily.issues.join(', '));
                 }
               }
-              if (report.totalInstruments > 0 && report.healthPct < 50) {
-                console.error('CRITICAL: Feed health below 50%!');
+              const availableCount = report.healthy + report.degraded;
+              const availablePct = report.totalInstruments > 0
+                ? (availableCount / report.totalInstruments) * 100
+                : 0;
+              console.log('Available count:', availableCount);
+              console.log('Available %:', availablePct.toFixed(2));
+
+              if (report.totalInstruments === 0) {
+                console.error('CRITICAL: No instruments in quality report.');
                 process.exit(1);
+              }
+
+              if (report.missing >= 5 || availablePct < 95) {
+                console.error('CRITICAL: Data availability gate failed (missing >= 5 or available < 95%).');
+                process.exit(1);
+              }
+
+              if (report.healthPct < 50) {
+                console.warn('WARNING: Feed health below 50% (stale/degraded), but availability gate passed.');
               }
             })().catch((err) => {
               console.error(err);
