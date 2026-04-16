@@ -26,7 +26,7 @@ jobs:
 
   quality-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     needs: test
 
     steps:
@@ -55,16 +55,24 @@ jobs:
         run: |
           node -e "
             (async () => {
+              const t0 = Date.now();
               const { initDb } = require('./apps/api/src/db/connection');
               await initDb();
+              const t1 = Date.now();
               const { assessAllFeedQuality } = require('./apps/api/src/ingest/feedMonitor');
               const report = assessAllFeedQuality();
+              const t2 = Date.now();
               console.log('=== Feed Quality Report ===');
               console.log('Total instruments:', report.totalInstruments);
               console.log('Healthy:', report.healthy);
               console.log('Degraded:', report.degraded);
               console.log('Missing:', report.missing);
               console.log('Health %:', report.healthPct);
+              console.log('Timing ms:', {
+                initDb: t1 - t0,
+                assessAllFeedQuality: t2 - t1,
+                total: t2 - t0,
+              });
               if (report.details.length > 0) {
                 console.log('\n--- Issues ---');
                 for (const d of report.details.slice(0, 10)) {
@@ -101,11 +109,19 @@ jobs:
         run: |
           node -e "
             (async () => {
+              const t0 = Date.now();
               const { initDb, query } = require('./apps/api/src/db/connection');
               await initDb();
+              const t1 = Date.now();
               const models = query(\"SELECT COUNT(*) as n FROM model_registry WHERE status = 'active'\");
+              const t2 = Date.now();
               const n = models[0]?.n || 0;
               console.log('Active ML models:', n);
+              console.log('Timing ms:', {
+                initDb: t1 - t0,
+                modelQuery: t2 - t1,
+                total: t2 - t0,
+              });
               if (n === 0) {
                 console.warn('WARNING: No active ML models found');
               }

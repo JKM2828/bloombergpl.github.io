@@ -96,6 +96,8 @@ describe('feedMonitor', () => {
       const result = assessAllFeedQuality();
       assert.equal(result.totalInstruments, 1);
       assert.equal(typeof result.healthPct, 'number');
+      const stats = mockDb.getStats();
+      assert.equal(stats.queryCalls, 3, 'assessAllFeedQuality should use one instruments query + two batched candle queries');
     });
   });
 });

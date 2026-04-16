@@ -4,32 +4,126 @@
 // Checks data freshness, gaps, duplicates per ticker/timeframe.
 // Returns health status and auto-fallback recommendation.
 // ============================================================
-const { query, queryOne, run, saveDb } = require('../db/connection');
+const { query } = require('../db/connection');
 
-/**
- * Assess quality of candle data for a given ticker and timeframe.
- * Returns { healthy, issues[], fallbackRecommended, stats }
- */
-function assessFeedQuality(ticker, timeframe = '1d', instrType = null) {
-  const issues = [];
+const VALID_TIMEFRAMES = ['1d', '1h', '5m'];
+const LOOKBACK_BY_TIMEFRAME = {
+  '1d': 120,
+  '1h': 240,
+  '5m': 360,
+};
 
-  // DATA-M3: Use parameterized queries — whitelist timeframe to prevent SQL injection
-  const VALID_TIMEFRAMES = ['1d', '1h', '5m'];
-  const safeTimeframe = VALID_TIMEFRAMES.includes(timeframe) ? timeframe : '1d';
+function normalizeTimeframe(timeframe) {
+  return VALID_TIMEFRAMES.includes(timeframe) ? timeframe : '1d';
+}
 
-  let tfParam, tfSql, queryParams;
+function fetchRecentCandlesForTicker(ticker, safeTimeframe, limit) {
   if (safeTimeframe === '1d') {
-    tfSql = "(timeframe = ? OR timeframe IS NULL)";
-    queryParams = [ticker, '1d'];
-  } else {
-    tfSql = "timeframe = ?";
-    queryParams = [ticker, safeTimeframe];
+    return query(
+      `SELECT date, open, high, low, close, volume
+       FROM (
+         SELECT date, open, high, low, close, volume
+         FROM candles
+         WHERE ticker = ? AND (timeframe = ? OR timeframe IS NULL)
+         ORDER BY date DESC
+         LIMIT ?
+       ) recent
+       ORDER BY date ASC`,
+      [ticker, '1d', limit]
+    );
   }
 
-  const candles = query(
-    `SELECT date, open, high, low, close, volume FROM candles WHERE ticker = ? AND ${tfSql} ORDER BY date ASC`,
-    queryParams
+  return query(
+    `SELECT date, open, high, low, close, volume
+     FROM (
+       SELECT date, open, high, low, close, volume
+       FROM candles
+       WHERE ticker = ? AND timeframe = ?
+       ORDER BY date DESC
+       LIMIT ?
+     ) recent
+     ORDER BY date ASC`,
+    [ticker, safeTimeframe, limit]
   );
+}
+
+function groupCandlesByTicker(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!grouped.has(row.ticker)) grouped.set(row.ticker, []);
+    grouped.get(row.ticker).push({
+      date: row.date,
+      open: row.open,
+      high: row.high,
+      low: row.low,
+      close: row.close,
+      volume: row.volume,
+    });
+  }
+  return grouped;
+}
+
+function fetchRecentCandlesForTickers(tickers, safeTimeframe, limit) {
+  if (tickers.length === 0) return new Map();
+
+  const placeholders = tickers.map(() => '?').join(', ');
+
+  try {
+    if (safeTimeframe === '1d') {
+      const rows = query(
+        `SELECT ticker, date, open, high, low, close, volume
+         FROM (
+           SELECT
+             ticker,
+             date,
+             open,
+             high,
+             low,
+             close,
+             volume,
+             ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn
+           FROM candles
+           WHERE ticker IN (${placeholders}) AND (timeframe = ? OR timeframe IS NULL)
+         ) ranked
+         WHERE rn <= ?
+         ORDER BY ticker ASC, date ASC`,
+        [...tickers, '1d', limit]
+      );
+      return groupCandlesByTicker(rows);
+    }
+
+    const rows = query(
+      `SELECT ticker, date, open, high, low, close, volume
+       FROM (
+         SELECT
+           ticker,
+           date,
+           open,
+           high,
+           low,
+           close,
+           volume,
+           ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn
+         FROM candles
+         WHERE ticker IN (${placeholders}) AND timeframe = ?
+       ) ranked
+       WHERE rn <= ?
+       ORDER BY ticker ASC, date ASC`,
+      [...tickers, safeTimeframe, limit]
+    );
+    return groupCandlesByTicker(rows);
+  } catch {
+    // Fallback for older SQLite builds without window functions.
+    const fallback = new Map();
+    for (const ticker of tickers) {
+      fallback.set(ticker, fetchRecentCandlesForTicker(ticker, safeTimeframe, limit));
+    }
+    return fallback;
+  }
+}
+
+function evaluateFeedFromCandles(candles, safeTimeframe, instrType) {
+  const issues = [];
 
   if (candles.length === 0) {
     return { healthy: false, issues: ['No data'], fallbackRecommended: true, stats: {} };
@@ -103,16 +197,29 @@ function assessFeedQuality(ticker, timeframe = '1d', instrType = null) {
 }
 
 /**
+ * Assess quality of candle data for a given ticker and timeframe.
+ * Returns { healthy, issues[], fallbackRecommended, stats }
+ */
+function assessFeedQuality(ticker, timeframe = '1d', instrType = null) {
+  const safeTimeframe = normalizeTimeframe(timeframe);
+  const candles = fetchRecentCandlesForTicker(ticker, safeTimeframe, LOOKBACK_BY_TIMEFRAME[safeTimeframe] || 120);
+  return evaluateFeedFromCandles(candles, safeTimeframe, instrType);
+}
+
+/**
  * Assess feed quality for ALL active instruments.
  * Returns summary + per-ticker details.
  */
 function assessAllFeedQuality() {
   const instruments = query("SELECT ticker, type FROM instruments WHERE active = 1 AND type IN ('STOCK','ETF','FUTURES','INDEX')");
   const results = { healthy: 0, degraded: 0, missing: 0, details: [] };
+  const tickers = instruments.map(i => i.ticker);
+  const dailyByTicker = fetchRecentCandlesForTickers(tickers, '1d', LOOKBACK_BY_TIMEFRAME['1d']);
+  const intradayByTicker = fetchRecentCandlesForTickers(tickers, '1h', LOOKBACK_BY_TIMEFRAME['1h']);
 
   for (const inst of instruments) {
-    const daily = assessFeedQuality(inst.ticker, '1d', inst.type);
-    const intraday = assessFeedQuality(inst.ticker, '1h', inst.type);
+    const daily = evaluateFeedFromCandles(dailyByTicker.get(inst.ticker) || [], '1d', inst.type);
+    const intraday = evaluateFeedFromCandles(intradayByTicker.get(inst.ticker) || [], '1h', inst.type);
 
     const status = daily.healthy ? 'healthy' : (daily.stats.totalBars > 0 ? 'degraded' : 'missing');
     results[status]++;

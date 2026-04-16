@@ -18,16 +18,63 @@ jobs:
           API_BASE_URL: ${{ secrets.HEROKU_API_BASE_URL }}
         run: |
           set -euo pipefail
-          BASE_URL="${API_BASE_URL:-https://bloomberpl-da6e13c64b4e.herokuapp.com}"
-          KEEPALIVE_URL="${BASE_URL%/}/keepalive"
+          DEFAULT_BASE_URL="https://bloomberpl-da6e13c64b4e.herokuapp.com"
+          RAW_BASE_URL="${API_BASE_URL:-}"
 
-          echo "Pinging ${KEEPALIVE_URL}"
-          HTTP_CODE=$(curl -sS -o /tmp/keepalive-response.json -w "%{http_code}" "${KEEPALIVE_URL}")
-
-          echo "HTTP ${HTTP_CODE}"
-          cat /tmp/keepalive-response.json || true
-
-          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
-            echo "Keepalive ping failed"
-            exit 1
+          SANITIZED_BASE_URL="$(printf '%s' "$RAW_BASE_URL" | sed "s/\r//g; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^['\"]//; s/['\"]$//")"
+          if [ -n "$SANITIZED_BASE_URL" ] && [[ ! "$SANITIZED_BASE_URL" =~ ^https?:// ]]; then
+            SANITIZED_BASE_URL="https://${SANITIZED_BASE_URL}"
           fi
+
+          PRIMARY_BASE_URL="${SANITIZED_BASE_URL:-$DEFAULT_BASE_URL}"
+
+          try_keepalive() {
+            local base_url="$1"
+            local keepalive_url="${base_url%/}/keepalive"
+            local host
+            host="$(printf '%s' "$base_url" | sed -E 's#^https?://([^/]+).*$#\1#')"
+
+            echo "Pinging host: ${host}"
+            rm -f /tmp/keepalive-response.json /tmp/keepalive-error.log
+
+            set +e
+            local http_code
+            http_code="$(curl -sS --connect-timeout 12 --max-time 30 -o /tmp/keepalive-response.json -w "%{http_code}" "$keepalive_url" 2>/tmp/keepalive-error.log)"
+            local curl_exit=$?
+            set -e
+
+            if [ "$curl_exit" -ne 0 ]; then
+              echo "curl failed (exit=${curl_exit})"
+              cat /tmp/keepalive-error.log || true
+              return 1
+            fi
+
+            echo "HTTP ${http_code}"
+            cat /tmp/keepalive-response.json || true
+
+            if [[ ! "$http_code" =~ ^[0-9]{3}$ ]]; then
+              echo "Invalid HTTP code from curl output"
+              return 1
+            fi
+
+            if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+              echo "Non-2xx response from keepalive endpoint"
+              return 1
+            fi
+
+            return 0
+          }
+
+          if try_keepalive "$PRIMARY_BASE_URL"; then
+            exit 0
+          fi
+
+          if [ "$PRIMARY_BASE_URL" != "$DEFAULT_BASE_URL" ]; then
+            echo "Primary target failed, trying fallback host"
+            if try_keepalive "$DEFAULT_BASE_URL"; then
+              exit 0
+            fi
+          fi
+
+          echo "Keepalive ping failed on all targets"
+          exit 1
