@@ -106,6 +106,32 @@ let stats = {
   lastRunId: null,
 };
 
+function hasPendingOrRunningJob(jobType) {
+  return !!queryOne(
+    "SELECT 1 FROM jobs WHERE job_type = ? AND status IN ('pending','running') LIMIT 1",
+    [jobType]
+  );
+}
+
+function getLowHistoryTickerCount() {
+  return (queryOne(`
+    SELECT COUNT(*) AS n
+    FROM (
+      SELECT i.ticker, i.type, COALESCE(c.n, 0) AS candleCount
+      FROM instruments i
+      LEFT JOIN (
+        SELECT ticker, COUNT(*) AS n
+        FROM candles
+        WHERE timeframe = '1d' OR timeframe IS NULL
+        GROUP BY ticker
+      ) c ON c.ticker = i.ticker
+      WHERE i.active = 1 AND i.type IN ('STOCK','ETF','FUTURES','INDEX')
+    ) t
+    WHERE (t.type = 'FUTURES' AND t.candleCount < 40)
+       OR (t.type IN ('STOCK','ETF','INDEX') AND t.candleCount < 60)
+  `) || {}).n || 0;
+}
+
 // ============================================================
 // PIPELINE RUN TRACKING
 // ============================================================
@@ -457,6 +483,20 @@ const processors = {
 
     stats.lastAnalysisCycle = new Date().toISOString();
     stats.analysisRuns++;
+
+    const lowHistory = getLowHistoryTickerCount();
+    const needsRecovery = rankCoveragePct < 15 && lowHistory >= 50;
+    const backfillQueued = hasPendingOrRunningJob('backfill_history');
+    const lastBackfillAgeHours = stats.lastBackfill
+      ? (Date.now() - new Date(stats.lastBackfill).getTime()) / 3600000
+      : null;
+    const cooldownPassed = lastBackfillAgeHours == null || lastBackfillAgeHours >= 6;
+    if (needsRecovery && !backfillQueued && cooldownPassed) {
+      const recoveryPayload = { lookbackDays: 730, maxTickers: 120, maxRequests: 60 };
+      enqueueJob('backfill_history', recoveryPayload, 3);
+      console.warn(`[worker] Auto-recovery: low coverage=${rankCoveragePct}% and low-history=${lowHistory} — queued backfill_history`);
+    }
+
     console.log(`[worker] Analysis pipeline complete (run_id=${runId}, run #${stats.analysisRuns}, ranked=${rankedOk}/${universeTotal}, coverage=${rankCoveragePct}%, degraded=${degraded})`);
   },
 
@@ -505,14 +545,21 @@ async function processNextJob() {
 
     // Chain: after successful ingest, auto-enqueue analysis
     if (job.job_type === 'ingest') {
-      const alreadyQueued = queryOne(
-        "SELECT 1 FROM jobs WHERE job_type = 'analysis' AND status IN ('pending','running')"
-      );
+      const alreadyQueued = hasPendingOrRunningJob('analysis');
       if (!alreadyQueued) {
         enqueueJob('analysis', {}, 4);
         console.log('[worker] Auto-enqueued analysis after ingest');
       } else {
         console.log('[worker] Analysis already queued/running — skipping auto-enqueue');
+      }
+    }
+
+    // Chain: after successful backfill, run analysis to materialize coverage gains
+    if (job.job_type === 'backfill_history') {
+      const alreadyQueued = hasPendingOrRunningJob('analysis');
+      if (!alreadyQueued) {
+        enqueueJob('analysis', {}, 4);
+        console.log('[worker] Auto-enqueued analysis after backfill_history');
       }
     }
 
@@ -626,10 +673,25 @@ function startScheduler() {
   }, { timezone: TIMEZONE });
 
   // Daily low-history backfill (off-hours) to rebuild ML universe depth.
+  cron.schedule('15 19 * * 1-5', () => {
+    stats.mode = 'off-hours';
+    console.log('[cron:off-hours] Enqueueing low-history backfill (session close)');
+    enqueueJob('backfill_history', { lookbackDays: 730, maxTickers: 100, maxRequests: 50 }, 6);
+    drainQueue().catch(console.error);
+  }, { timezone: TIMEZONE });
+
   cron.schedule('15 23 * * 1-5', () => {
     stats.mode = 'off-hours';
     console.log('[cron:off-hours] Enqueueing low-history backfill');
     enqueueJob('backfill_history', { lookbackDays: 730, maxTickers: 80, maxRequests: 40 }, 6);
+    drainQueue().catch(console.error);
+  }, { timezone: TIMEZONE });
+
+  // Weekend recovery window
+  cron.schedule('30 12 * * 0,6', () => {
+    stats.mode = 'off-hours';
+    console.log('[cron:weekend] Enqueueing low-history backfill');
+    enqueueJob('backfill_history', { lookbackDays: 730, maxTickers: 120, maxRequests: 60 }, 5);
     drainQueue().catch(console.error);
   }, { timezone: TIMEZONE });
 

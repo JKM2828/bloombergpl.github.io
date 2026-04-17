@@ -993,6 +993,39 @@ router.post('/pipeline/run', requireAdmin, async (req, res) => {
   }
 });
 
+// Recovery trigger (async) — prioritize rebuilding history + analysis coverage
+router.post('/pipeline/recover', requireAdmin, async (req, res) => {
+  try {
+    const lookbackDays = parseInt(req.query.lookbackDays || req.body?.lookbackDays) || 730;
+    const maxTickers = parseInt(req.query.maxTickers || req.body?.maxTickers) || 120;
+    const maxRequests = parseInt(req.query.maxRequests || req.body?.maxRequests) || 60;
+    const enqueueTrain = String(req.query.enqueueTrain || req.body?.enqueueTrain || '1') !== '0';
+
+    enqueueJob('backfill_history', { lookbackDays, maxTickers, maxRequests }, 1);
+    enqueueJob('ingest', { mode: 'incremental' }, 2);
+    if (enqueueTrain) enqueueJob('train', { reason: 'recovery' }, 3);
+    enqueueJob('analysis', {}, 4);
+
+    drainQueue().catch(err => console.error('[pipeline/recover] Background drain error:', err.message));
+    res.status(202).json({
+      message: 'Recovery pipeline queued — backfill + ingest + analysis',
+      queued: {
+        backfill_history: { lookbackDays, maxTickers, maxRequests },
+        ingest: { mode: 'incremental' },
+        train: enqueueTrain,
+        analysis: true,
+      },
+      monitor: {
+        worker: '/api/worker/status',
+        pipeline: '/api/pipeline/latest',
+        health: '/api/health',
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============================================================
 // Audit Log
 // ============================================================

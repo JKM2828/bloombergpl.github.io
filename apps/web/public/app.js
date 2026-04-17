@@ -470,6 +470,14 @@ async function loadSystemStatus() {
     const blockersHtml = data.recoveryBlockers && data.recoveryBlockers.length > 0
       ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--yellow)">⚠ Blokady recovery (${data.recoveryBlockers.length})</summary><ul style="margin:4px 0 0 16px;font-size:0.85em">${data.recoveryBlockers.map(b => `<li>${esc(b)}</li>`).join('')}</ul></details>`
       : '';
+    const lowHistory = data.dataDepth?.lowHistoryTickers;
+    const avgCandles = data.dataDepth?.avgDailyCandlesPerTicker;
+    const dataDepthLine = lowHistory != null
+      ? `<p>Głębokość historii: <strong>${lowHistory}</strong> tickerów poniżej progu ML | średnio <strong>${avgCandles ?? '—'}</strong> świec/ticker</p>`
+      : '';
+    const dataDepthWarn = lowHistory != null && lowHistory > 40
+      ? '<p style="color:var(--yellow);font-size:0.85em">⚠ Odbudowa historii trwa: ranking może rotować wolniej, mimo świeżego ingestu.</p>'
+      : '';
     document.getElementById('system-status').innerHTML = `
       <div style="font-size:0.9em">
         <p>Status: <strong style="color:${statusColor}">${esc(data.status).toUpperCase()}</strong></p>
@@ -477,6 +485,8 @@ async function loadSystemStatus() {
         <p>Świece w bazie: <strong>${data.candles.toLocaleString()}</strong></p>
         <p>Ostatni ingest: <strong>${esc(data.lastIngest || 'brak')}</strong>${lastIngestAge}</p>
         ${freshnessLine}
+        ${dataDepthLine}
+        ${dataDepthWarn}
         ${limitHint}
         ${blockersHtml}
         ${data.alerts && data.alerts.length > 0 ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--red)">🚨 Alerty (${data.alerts.length})</summary><ul style="margin:4px 0 0 16px;font-size:0.85em">${data.alerts.map(a => `<li style="color:${a.level === 'critical' ? 'var(--red)' : 'var(--yellow)'}">${esc(a.message)}</li>`).join('')}</ul></details>` : ''}

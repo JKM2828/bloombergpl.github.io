@@ -272,6 +272,19 @@ describe('portfolio endpoints require requireAdmin', () => {
       'POST /ingest/backfill must use requireAdmin middleware'
     );
   });
+
+  it('POST /pipeline/recover is guarded by requireAdmin', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const routeSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'src', 'routes', 'index.js'),
+      'utf8'
+    );
+    assert.ok(
+      routeSrc.includes("router.post('/pipeline/recover', requireAdmin"),
+      'POST /pipeline/recover must use requireAdmin middleware'
+    );
+  });
 });
 
 // ---- XSS: competition onclick uses esc() ----
