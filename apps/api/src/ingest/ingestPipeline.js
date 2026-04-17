@@ -42,6 +42,17 @@ const FALLBACK_DELAY_MS = 2000;  // pause between fallback batches
 const TICKER_DELAY_MS = 300;     // pause between individual requests
 const JITTER_MAX_MS = 500;       // random jitter added to delays
 
+const MIN_CANDLES_BY_TYPE = {
+  STOCK: 60,
+  ETF: 60,
+  INDEX: 60,
+  FUTURES: 40,
+};
+
+function getMinCandlesForType(type) {
+  return MIN_CANDLES_BY_TYPE[type] || 60;
+}
+
 // ---- Last cycle stats (used by analysis pipeline for degradation) ----
 let lastCycleStats = null;
 function getLastCycleStats() { return lastCycleStats; }
@@ -394,6 +405,118 @@ async function ingestIncremental() {
 }
 
 /**
+ * Backfill historical candles for low-history active instruments.
+ * This is a recovery job to restore ML/screener coverage when many tickers
+ * have too few daily candles for feature engineering thresholds.
+ *
+ * @param {Object} opts
+ * @param {number} opts.lookbackDays - history range for provider fetch (default: 730)
+ * @param {number} opts.maxTickers - max low-history tickers to process (default: 80)
+ * @param {number} opts.maxRequests - max provider calls in this run (default: 40)
+ */
+async function ingestBackfillHistory(opts = {}) {
+  const lookbackDays = Math.max(30, parseInt(opts.lookbackDays || 730, 10));
+  const maxTickers = Math.max(1, parseInt(opts.maxTickers || 80, 10));
+  const maxRequests = Math.max(1, parseInt(opts.maxRequests || 40, 10));
+
+  const candidates = query(`
+    SELECT i.ticker, i.type, COALESCE(c.n, 0) AS candleCount
+    FROM instruments i
+    LEFT JOIN (
+      SELECT ticker, COUNT(*) AS n
+      FROM candles
+      WHERE timeframe = '1d' OR timeframe IS NULL
+      GROUP BY ticker
+    ) c ON c.ticker = i.ticker
+    WHERE i.active = 1 AND i.type IN ('STOCK','ETF','FUTURES','INDEX')
+    ORDER BY candleCount ASC, i.ticker ASC
+  `);
+
+  const lowHistory = candidates
+    .map((r) => ({
+      ticker: r.ticker,
+      type: r.type,
+      candleCount: Number(r.candleCount || 0),
+      minCandles: getMinCandlesForType(r.type),
+    }))
+    .filter((r) => r.candleCount < r.minCandles)
+    .sort((a, b) => (b.minCandles - b.candleCount) - (a.minCandles - a.candleCount));
+
+  const selected = lowHistory.slice(0, maxTickers);
+  if (selected.length === 0) {
+    const summary = {
+      processed: 0,
+      requested: maxTickers,
+      lowHistoryTotal: 0,
+      inserted: 0,
+      insertedTickers: 0,
+      noData: 0,
+      errors: 0,
+      rateLimited: 0,
+      httpCalls: 0,
+      lookbackDays,
+      timestamp: new Date().toISOString(),
+    };
+    console.log('[backfill] No low-history tickers found — skipping.');
+    return summary;
+  }
+
+  const dateTo = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const dateFrom = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
+
+  let inserted = 0;
+  let insertedTickers = 0;
+  let noData = 0;
+  let errors = 0;
+  let rateLimited = 0;
+  let httpCalls = 0;
+
+  console.log(`[backfill] Starting history recovery: ${selected.length}/${lowHistory.length} low-history tickers, budget=${maxRequests} calls, lookback=${lookbackDays}d`);
+
+  for (let i = 0; i < selected.length; i++) {
+    if (httpCalls >= maxRequests) {
+      console.warn(`[backfill] Budget exhausted (${httpCalls}/${maxRequests}) — stopping.`);
+      break;
+    }
+
+    const t = selected[i];
+    const delayMs = i === 0 ? 0 : (TICKER_DELAY_MS + Math.floor(Math.random() * JITTER_MAX_MS));
+    try {
+      const r = await processTicker(t.ticker, dateFrom, dateTo, delayMs);
+      httpCalls++;
+      inserted += r.inserted;
+      if (r.inserted > 0) insertedTickers++;
+      if (r.noData) noData++;
+      if (r.rateLimited) {
+        rateLimited++;
+      }
+    } catch (err) {
+      errors++;
+      httpCalls++;
+      console.warn(`[backfill] ${t.ticker} failed: ${err.message}`);
+    }
+  }
+
+  saveDb();
+  const summary = {
+    processed: Math.min(selected.length, httpCalls),
+    requested: maxTickers,
+    lowHistoryTotal: lowHistory.length,
+    inserted,
+    insertedTickers,
+    noData,
+    errors,
+    rateLimited,
+    httpCalls,
+    lookbackDays,
+    timestamp: new Date().toISOString(),
+  };
+
+  console.log(`[backfill] Done: processed=${summary.processed}, inserted=${inserted}, insertedTickers=${insertedTickers}, noData=${noData}, errors=${errors}, rateLimited=${rateLimited}`);
+  return summary;
+}
+
+/**
  * Validate a single ticker against Stooq – returns true if data exists.
  */
 async function validateTicker(ticker) {
@@ -648,4 +771,12 @@ async function ingestIntraday5m(maxTickers = 200) {
   return { total, fetched, attempted: instruments.length, errors, timeframe: '5m' };
 }
 
-module.exports = { ingestAll, ingestIncremental, ingestIntraday, ingestIntraday5m, validateTicker, getLastCycleStats };
+module.exports = {
+  ingestAll,
+  ingestIncremental,
+  ingestBackfillHistory,
+  ingestIntraday,
+  ingestIntraday5m,
+  validateTicker,
+  getLastCycleStats,
+};

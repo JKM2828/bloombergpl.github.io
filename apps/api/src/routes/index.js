@@ -4,7 +4,7 @@
 const express = require('express');
 const { query, queryOne, run, saveDb, getDbHealth } = require('../db/connection');
 const { runScreener, getLatestRanking, getDailyPicks, saveDailyPicks, validatePastPicks, getPickPerformance, getPickStats, getFuturesPicks, getBestToInvest, getDailyGrowthReport, getWeeklyGrowthReport } = require('../screener/rankingService');
-const { ingestAll, ingestIncremental, ingestIntraday, ingestIntraday5m, validateTicker } = require('../ingest/ingestPipeline');
+const { ingestAll, ingestIncremental, ingestBackfillHistory, ingestIntraday, ingestIntraday5m, validateTicker, getLastCycleStats } = require('../ingest/ingestPipeline');
 const { getLiveStats } = require('../ws/liveCandles');
 const portfolio = require('../portfolio/portfolioService');
 const providerManager = require('../providers');
@@ -15,7 +15,6 @@ const { backtestAll } = require('../ml/backtest');
 const { trainT1Model, predictTopGainersT1, validateT1Predictions, backtestT1, getT1KPI, getLatestTopGainersT1, loadT1Model } = require('../ml/topGainersT1');
 const { generateAllSignals, getLatestSignals, assessPortfolioRisk, calculateStopLevels, computeSellLevels, getSellCandidates, getCompetitionSellCandidates, computeCompetitionAllocation, RISK_CONFIG, COMPETITION_DEFAULTS } = require('../ml/riskEngine');
 const { enqueueJob, drainQueue, getWorkerStatus, getCurrentMode, getPrecisionKPI, getLatestPipelineRun, getPipelineRunById, checkAlerts } = require('../worker/jobWorker');
-const { getLastCycleStats } = require('../ingest/ingestPipeline');
 const { assessFeedQuality, assessAllFeedQuality } = require('../ingest/feedMonitor');
 const requireAdmin = require('../middleware/requireAdmin');
 
@@ -515,6 +514,24 @@ router.post('/ingest/intraday5m', requireAdmin, async (req, res) => {
   }
 });
 
+router.post('/ingest/backfill', requireAdmin, async (req, res) => {
+  try {
+    const lookbackDays = parseInt(req.query.lookbackDays || req.body?.lookbackDays) || 730;
+    const maxTickers = parseInt(req.query.maxTickers || req.body?.maxTickers) || 80;
+    const maxRequests = parseInt(req.query.maxRequests || req.body?.maxRequests) || 40;
+    const result = await ingestBackfillHistory({ lookbackDays, maxTickers, maxRequests });
+    res.json({
+      message: 'History backfill complete',
+      lookbackDays,
+      maxTickers,
+      maxRequests,
+      ...result,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============================================================
 // Portfolio
 // ============================================================
@@ -604,6 +621,31 @@ router.get('/health', async (req, res) => {
     "SELECT COUNT(DISTINCT ticker) as n FROM candles WHERE date >= date('now', '-3 days')"
   ) || {}).n || 0;
   const staleCount = instrumentCount - freshCount;
+  const lowHistoryCount = (queryOne(`
+    SELECT COUNT(*) AS n
+    FROM (
+      SELECT i.ticker, i.type, COALESCE(c.n, 0) AS candleCount
+      FROM instruments i
+      LEFT JOIN (
+        SELECT ticker, COUNT(*) AS n
+        FROM candles
+        WHERE timeframe = '1d' OR timeframe IS NULL
+        GROUP BY ticker
+      ) c ON c.ticker = i.ticker
+      WHERE i.active = 1 AND i.type IN ('STOCK','ETF','FUTURES','INDEX')
+    ) t
+    WHERE (t.type = 'FUTURES' AND t.candleCount < 40)
+       OR (t.type IN ('STOCK','ETF','INDEX') AND t.candleCount < 60)
+  `) || {}).n || 0;
+  const avgDailyCandlesPerTicker = Number((queryOne(`
+    SELECT AVG(cnt) AS n
+    FROM (
+      SELECT COUNT(*) AS cnt
+      FROM candles
+      WHERE timeframe = '1d' OR timeframe IS NULL
+      GROUP BY ticker
+    )
+  `) || {}).n || 0);
 
   // Data staleness detection: if lastIngest is older than 24h, flag it
   const lastIngestAge = lastIngest ? Math.round((Date.now() - new Date(lastIngest).getTime()) / 1000) : null;
@@ -625,13 +667,13 @@ router.get('/health', async (req, res) => {
   // Recovery blockers: list what is preventing the system from recovering
   // Suppress informational items when system is fully healthy
   const recoveryBlockers = [];
-  if (providers.some(p => isOptionalDisabled(p)) && !(freshnessFull && worker.isRunning && dbOk)) {
-    recoveryBlockers.push('EODHD_API_KEY not configured (optional provider disabled)');
-  }
+  const partialMissing = Math.max(0, lastCycle?.stillMissing ?? ((lastCycle?.tickers || 0) - (lastCycle?.batchHits || 0)));
+  const partialMissingPct = (lastCycle?.tickers || 0) > 0 ? partialMissing / lastCycle.tickers : 0;
+  const isSignificantBatchPartial = partialMissing > 1 || partialMissingPct > 0.01;
   if (lastCycle?.budgetExhausted) {
     recoveryBlockers.push('HTTP budget exhausted in last ingest cycle');
   }
-  if (lastCycle?.batchPartial && !freshnessFull && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
+  if (lastCycle?.batchPartial && !freshnessFull && isSignificantBatchPartial) {
     recoveryBlockers.push(`Batch partial: ${lastCycle.batchHits}/${lastCycle.tickers} tickers from Stooq JSON`);
   }
   if (!worker.isRunning) {
@@ -649,6 +691,10 @@ router.get('/health', async (req, res) => {
     lastIngest,
     lastIngestAgeSec: lastIngestAge,
     freshness: { fresh: freshCount, stale: staleCount, total: instrumentCount },
+    dataDepth: {
+      lowHistoryTickers: lowHistoryCount,
+      avgDailyCandlesPerTicker: Math.round(avgDailyCandlesPerTicker * 10) / 10,
+    },
     dataStale,
     recoveryBlockers: recoveryBlockers.length > 0 ? recoveryBlockers : undefined,
     alerts: alerts.length > 0 ? alerts : undefined,

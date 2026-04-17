@@ -15,7 +15,7 @@
 // ============================================================
 const cron = require('node-cron');
 const { query, queryOne, run, saveDb } = require('../db/connection');
-const { ingestIncremental, ingestAll, ingestIntraday5m, getLastCycleStats } = require('../ingest/ingestPipeline');
+const { ingestIncremental, ingestAll, ingestBackfillHistory, ingestIntraday5m, getLastCycleStats } = require('../ingest/ingestPipeline');
 const { computeAllFeatures } = require('../ml/featureEngineering');
 const { trainAll, predictAll } = require('../ml/mlEngine');
 const { generateAllSignals, getCompetitionSellCandidates } = require('../ml/riskEngine');
@@ -39,6 +39,7 @@ const JOB_TIMEOUTS = {
   intraday5m:    3 * 60 * 1000,   // 3 min
   train_t1:      10 * 60 * 1000,  // 10 min
   predict_t1:    3 * 60 * 1000,   // 3 min
+  backfill_history: 20 * 60 * 1000, // 20 min
 };
 const DEFAULT_JOB_TIMEOUT = 5 * 60 * 1000;
 
@@ -95,6 +96,7 @@ let stats = {
   lastTraining: null,
   lastPrediction: null,
   lastScreener: null,
+  lastBackfill: null,
   lastAnalysisCycle: null,
   jobsProcessed: 0,
   jobsFailed: 0,
@@ -231,6 +233,12 @@ const processors = {
   async intraday5m(_payload) {
     await ingestIntraday5m();
     stats.lastIntraday5m = new Date().toISOString();
+  },
+
+  async backfill_history(payload) {
+    const result = await ingestBackfillHistory(payload || {});
+    stats.lastBackfill = new Date().toISOString();
+    console.log(`[worker] Backfill history: processed=${result.processed}, inserted=${result.inserted}, lowHistoryTotal=${result.lowHistoryTotal}`);
   },
 
   async features(_payload) {
@@ -614,6 +622,14 @@ function startScheduler() {
     stats.mode = 'off-hours';
     console.log('[cron:weekend] Eco ingest');
     enqueueJob('ingest', { mode: 'incremental' }, 5);
+    drainQueue().catch(console.error);
+  }, { timezone: TIMEZONE });
+
+  // Daily low-history backfill (off-hours) to rebuild ML universe depth.
+  cron.schedule('15 23 * * 1-5', () => {
+    stats.mode = 'off-hours';
+    console.log('[cron:off-hours] Enqueueing low-history backfill');
+    enqueueJob('backfill_history', { lookbackDays: 730, maxTickers: 80, maxRequests: 40 }, 6);
     drainQueue().catch(console.error);
   }, { timezone: TIMEZONE });
 

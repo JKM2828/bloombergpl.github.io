@@ -148,29 +148,21 @@ describe('health endpoint contract', () => {
     assert.equal(effectiveStatus, 'ok', 'effectiveStatus must be ok when freshness is full and system operational');
   });
 
-  it('suppresses EODHD blocker and batch partial when freshness is full', () => {
-    const providers = [
-      { provider: 'gpw', ok: true },
-      { provider: 'eodhd', ok: false, error: 'No API key (set EODHD_API_KEY)' },
-    ];
-    const isOptionalDisabled = (p) => p.provider === 'eodhd' && typeof p.error === 'string' && p.error.includes('No API key');
-
-    const dbOk = true;
+  it('suppresses optional EODHD blocker and batch partial when freshness is full', () => {
     const workerRunning = true;
     const freshnessFull = true;  // staleCount <= 0
-    const staleCount = 0;
     // Use stillMissing: 1 to verify freshnessFull suppresses batch partial blocker
     // even when not all batch tickers were covered (e.g. auto-deactivated)
     const lastCycle = { batchPartial: true, batchHits: 162, tickers: 163, stillMissing: 1, budgetExhausted: false };
 
     const recoveryBlockers = [];
-    if (providers.some(p => isOptionalDisabled(p)) && !(freshnessFull && workerRunning && dbOk)) {
-      recoveryBlockers.push('EODHD_API_KEY not configured');
-    }
+    const partialMissing = Math.max(0, lastCycle?.stillMissing ?? ((lastCycle?.tickers || 0) - (lastCycle?.batchHits || 0)));
+    const partialMissingPct = (lastCycle?.tickers || 0) > 0 ? partialMissing / lastCycle.tickers : 0;
+    const isSignificantBatchPartial = partialMissing > 1 || partialMissingPct > 0.01;
     if (lastCycle?.budgetExhausted) {
       recoveryBlockers.push('HTTP budget exhausted');
     }
-    if (lastCycle?.batchPartial && !freshnessFull && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
+    if (lastCycle?.batchPartial && !freshnessFull && isSignificantBatchPartial) {
       recoveryBlockers.push('Batch partial');
     }
     if (!workerRunning) {
@@ -180,30 +172,37 @@ describe('health endpoint contract', () => {
     assert.equal(recoveryBlockers.length, 0, 'No blockers when freshness full, worker running, db ok');
   });
 
-  it('shows EODHD blocker when freshness is NOT full', () => {
-    const providers = [
-      { provider: 'gpw', ok: true },
-      { provider: 'eodhd', ok: false, error: 'No API key (set EODHD_API_KEY)' },
-    ];
-    const isOptionalDisabled = (p) => p.provider === 'eodhd' && typeof p.error === 'string' && p.error.includes('No API key');
-
-    const dbOk = true;
-    const workerRunning = true;
+  it('does not show optional EODHD blocker when freshness is NOT full', () => {
     const freshnessFull = false;  // some instruments stale
-    const staleCount = 10;
     const lastCycle = { batchPartial: true, batchHits: 150, tickers: 163, stillMissing: 3, budgetExhausted: false };
 
     const recoveryBlockers = [];
-    if (providers.some(p => isOptionalDisabled(p)) && !(freshnessFull && workerRunning && dbOk)) {
-      recoveryBlockers.push('EODHD_API_KEY not configured');
-    }
-    if (lastCycle?.batchPartial && !freshnessFull && ((lastCycle.stillMissing || 0) > 0 || staleCount > 0)) {
+    const partialMissing = Math.max(0, lastCycle?.stillMissing ?? ((lastCycle?.tickers || 0) - (lastCycle?.batchHits || 0)));
+    const partialMissingPct = (lastCycle?.tickers || 0) > 0 ? partialMissing / lastCycle.tickers : 0;
+    const isSignificantBatchPartial = partialMissing > 1 || partialMissingPct > 0.01;
+    if (lastCycle?.batchPartial && !freshnessFull && isSignificantBatchPartial) {
       recoveryBlockers.push('Batch partial');
     }
 
-    assert.equal(recoveryBlockers.length, 2, 'Both blockers should show when freshness is incomplete');
-    assert.ok(recoveryBlockers.includes('EODHD_API_KEY not configured'));
+    assert.equal(recoveryBlockers.length, 1, 'Only meaningful batch blocker should show when freshness is incomplete');
     assert.ok(recoveryBlockers.includes('Batch partial'));
+  });
+
+  it('suppresses tiny batch partial (1 of 207) even when freshness is NOT full', () => {
+    const freshnessFull = false;
+    const lastCycle = { batchPartial: true, batchHits: 206, tickers: 207, stillMissing: 1, budgetExhausted: false };
+
+    const partialMissing = Math.max(0, lastCycle?.stillMissing ?? ((lastCycle?.tickers || 0) - (lastCycle?.batchHits || 0)));
+    const partialMissingPct = (lastCycle?.tickers || 0) > 0 ? partialMissing / lastCycle.tickers : 0;
+    const isSignificantBatchPartial = partialMissing > 1 || partialMissingPct > 0.01;
+
+    const recoveryBlockers = [];
+    if (lastCycle?.batchPartial && !freshnessFull && isSignificantBatchPartial) {
+      recoveryBlockers.push('Batch partial');
+    }
+
+    assert.equal(recoveryBlockers.length, 0, 'Tiny partial should not be treated as recovery blocker');
+    assert.equal(partialMissingPct < 0.01, true);
   });
 
   it('provider health result includes granular status field', () => {

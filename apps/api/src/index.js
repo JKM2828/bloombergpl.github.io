@@ -69,7 +69,7 @@ const costlyLimiter = rateLimit({
 });
 const costlyPaths = [
   '/api/pipeline/run', '/api/ml/train', '/api/ml/backtest', '/api/ml/features',
-  '/api/ingest/full', '/api/ingest/incremental', '/api/ingest/intraday', '/api/ingest/intraday5m',
+  '/api/ingest/full', '/api/ingest/incremental', '/api/ingest/intraday', '/api/ingest/intraday5m', '/api/ingest/backfill',
   '/api/predictions/run', '/api/ranking/run', '/api/worker/drain', '/api/worker/enqueue',
   '/api/portfolio/deposit', '/api/portfolio/withdraw', '/api/portfolio/buy', '/api/portfolio/sell',
 ];
