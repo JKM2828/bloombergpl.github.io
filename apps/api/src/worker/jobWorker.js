@@ -593,25 +593,30 @@ async function drainQueue() {
 // ============================================================
 // HELPER: current mode based on Warsaw time
 // ============================================================
-function getCurrentMode() {
-  const now = new Date();
-  // Warsaw offset: CET=+1, CEST=+2
-  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-  const warsawOffset = isDST(now) ? 2 : 1;
-  const warsaw = new Date(utc + warsawOffset * 3600000);
-  const hour = warsaw.getHours();
-  const dow = warsaw.getDay(); // 0=Sun, 6=Sat
+function getWarsawClock(refDate = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIMEZONE,
+    weekday: 'short',
+    hour: '2-digit',
+    hour12: false,
+  }).formatToParts(refDate);
+
+  const get = (type) => parts.find(p => p.type === type)?.value;
+  const weekday = get('weekday');
+  const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const dow = dayMap[weekday] ?? refDate.getDay();
+  const hourRaw = parseInt(get('hour') || '0', 10);
+  const hour = Number.isFinite(hourRaw) ? (hourRaw % 24) : 0;
+  return { dow, hour };
+}
+
+function getCurrentMode(refDate = new Date()) {
+  const { dow, hour } = getWarsawClock(refDate);
 
   if (dow === 0 || dow === 6) return 'off-hours'; // weekend
   if (hour >= 9 && hour < 17) return 'market';
   if (hour >= 17 && hour < 23) return 'off-hours';
   return 'night';
-}
-
-function isDST(d) {
-  const jan = new Date(d.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(d.getFullYear(), 6, 1).getTimezoneOffset();
-  return d.getTimezoneOffset() < Math.max(jan, jul);
 }
 
 // ============================================================

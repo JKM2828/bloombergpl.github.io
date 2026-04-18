@@ -50,6 +50,21 @@ describe('jobWorker', () => {
       const mode = jobWorker.getCurrentMode();
       assert.ok(['market', 'off-hours', 'night'].includes(mode), `Got unexpected mode: ${mode}`);
     });
+
+    it('uses Warsaw time boundaries for weekday market and off-hours', () => {
+      // 2026-04-21 Tue in CEST (UTC+2)
+      assert.equal(jobWorker.getCurrentMode(new Date('2026-04-21T06:59:00Z')), 'night');     // 08:59 Warsaw
+      assert.equal(jobWorker.getCurrentMode(new Date('2026-04-21T07:00:00Z')), 'market');    // 09:00 Warsaw
+      assert.equal(jobWorker.getCurrentMode(new Date('2026-04-21T14:59:00Z')), 'market');    // 16:59 Warsaw
+      assert.equal(jobWorker.getCurrentMode(new Date('2026-04-21T15:00:00Z')), 'off-hours'); // 17:00 Warsaw
+      assert.equal(jobWorker.getCurrentMode(new Date('2026-04-21T21:00:00Z')), 'night');     // 23:00 Warsaw
+    });
+
+    it('returns off-hours on weekend regardless of daytime hour', () => {
+      // 2026-04-18 Sat in CEST (UTC+2)
+      assert.equal(jobWorker.getCurrentMode(new Date('2026-04-18T08:00:00Z')), 'off-hours'); // 10:00 Warsaw
+      assert.equal(jobWorker.getCurrentMode(new Date('2026-04-18T20:00:00Z')), 'off-hours'); // 22:00 Warsaw
+    });
   });
 
   describe('getPrecisionKPI', () => {
