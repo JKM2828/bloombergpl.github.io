@@ -307,10 +307,11 @@ async function loadMlFreshness() {
     }
     if (status) {
       const tickers = status.tickers || [];
-      const total = tickers.length;
-      const trained = tickers.filter(t => t.hasModel).length;
-      const predicted = tickers.filter(t => t.hasPrediction).length;
-      const trainable = tickers.filter(t => t.trainable).length;
+      const summary = status.summary || {};
+      const total = summary.total ?? tickers.length;
+      const trained = summary.withModel ?? tickers.filter(t => !!t.model).length;
+      const predicted = summary.withPrediction ?? tickers.filter(t => !!t.prediction).length;
+      const trainable = summary.trainable ?? tickers.filter(t => t.trainable).length;
       const trainPct = total > 0 ? Math.round(trained / total * 100) : 0;
       const predPct = total > 0 ? Math.round(predicted / total * 100) : 0;
       const trainColor = trainPct >= 80 ? 'var(--green)' : trainPct >= 50 ? 'var(--yellow)' : 'var(--red)';
@@ -319,9 +320,9 @@ async function loadMlFreshness() {
       parts.push(`<span>Modele: <strong style="color:${trainColor}">${trained}/${total}</strong> (${trainPct}%) | Predykcje: <strong style="color:${predColor}">${predicted}/${total}</strong> (${predPct}%) | Gotowych do treningu: <strong>${trainable}</strong></span>`);
 
       // Show tickers without models
-      const noModel = tickers.filter(t => !t.hasModel);
+      const noModel = tickers.filter(t => !t.model);
       if (noModel.length > 0 && noModel.length <= 20) {
-        parts.push(`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--yellow)">⚠ Bez modelu (${noModel.length})</summary><div style="margin-top:4px;font-size:0.85em">${noModel.map(t => `${esc(t.ticker)}: ${t.candleCount} świec, ${t.featureCount} cech`).join(' | ')}</div></details>`);
+        parts.push(`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--yellow)">⚠ Bez modelu (${noModel.length})</summary><div style="margin-top:4px;font-size:0.85em">${noModel.map(t => `${esc(t.ticker)}: ${t.candles} świec, ${t.features} cech`).join(' | ')}</div></details>`);
       }
     }
 
