@@ -205,6 +205,27 @@ describe('input validation contracts', () => {
   });
 });
 
+describe('ML status schema mapping in dashboard', () => {
+  it('loadMlFreshness should use model/prediction and candles/features fields', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const appSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', '..', 'web', 'public', 'app.js'),
+      'utf8'
+    );
+
+    assert.ok(appSrc.includes('t.model'), 'Dashboard must detect models via t.model');
+    assert.ok(appSrc.includes('t.prediction'), 'Dashboard must detect predictions via t.prediction');
+    assert.ok(appSrc.includes('t.candles'), 'Dashboard must show candle count via t.candles');
+    assert.ok(appSrc.includes('t.features'), 'Dashboard must show feature count via t.features');
+
+    assert.ok(!appSrc.includes('t.hasModel'), 'Legacy hasModel key must not be used');
+    assert.ok(!appSrc.includes('t.hasPrediction'), 'Legacy hasPrediction key must not be used');
+    assert.ok(!appSrc.includes('t.candleCount'), 'Legacy candleCount key must not be used');
+    assert.ok(!appSrc.includes('t.featureCount'), 'Legacy featureCount key must not be used');
+  });
+});
+
 // ---- Portfolio endpoints require auth ----
 describe('portfolio endpoints require requireAdmin', () => {
   it('POST /portfolio/deposit is guarded by requireAdmin', () => {
