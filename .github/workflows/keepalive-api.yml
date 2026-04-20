@@ -4,8 +4,10 @@ on:
   schedule:
     # Market window (Warsaw 9-17, approx UTC 7-15): keep process warm every 5 minutes.
     - cron: '*/5 7-15 * * 1-5'
-    # Off-hours fallback: keep warm with low frequency.
-    - cron: '0 * * * *'
+    # Weekdays outside market window: keep warm every 20 minutes.
+    - cron: '*/20 0-6,16-23 * * 1-5'
+    # Weekends: keep warm every 20 minutes.
+    - cron: '*/20 * * * 0,6'
   workflow_dispatch:
 
 jobs:
@@ -59,6 +61,11 @@ jobs:
 
             if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
               echo "Non-2xx response from keepalive endpoint"
+              return 1
+            fi
+
+            if ! node -e 'const fs=require("fs"); const body=fs.readFileSync("/tmp/keepalive-response.json", "utf8"); let data; try { data = JSON.parse(body); } catch (err) { console.error("Invalid JSON payload from keepalive endpoint"); process.exit(1); } if (data.status !== "alive") { console.error("Unexpected keepalive status:", data.status); process.exit(1); } if (typeof data.uptime !== "number") { console.error("Missing numeric uptime in keepalive payload"); process.exit(1); }'; then
+              echo "Keepalive payload validation failed"
               return 1
             fi
 

@@ -109,6 +109,7 @@ POST wymagają nagłówka `X-API-Key: <ADMIN_API_KEY>` lub `Authorization: Beare
 | POST | `/api/ingest/full` | ✓ | Pełny ingest (365 dni) |
 | POST | `/api/pipeline/run` | ✓ | Pełny pipeline (202 + polling) |
 | GET | `/api/pipeline/status` | — | Status pipeline run |
+| GET | `/api/pipeline/latest` | — | Alias statusu ostatniego runa pipeline |
 | GET | `/api/predictions` | — | Predykcje ML + dataAgeSec + stale |
 | GET | `/api/signals` | — | Sygnały + dataAgeSec + stale |
 | POST | `/api/ml/train` | ✓ | Trening modeli ML (async) |
@@ -122,8 +123,33 @@ POST wymagają nagłówka `X-API-Key: <ADMIN_API_KEY>` lub `Authorization: Beare
 | `*/5 9-16 Pn-Pt` | Ingest intraday 5m |
 | `*/15 9-17 Pn-Pt` | Ingest przyrostowy |
 | `18:00 Pn-Pt` | Trening modeli (async, yield event loop) |
-| `18:30 Pn-Pt` | Pełny pipeline |
+| `19:15 / 23:15 Pn-Pt` | Backfill historii (niski budżet HTTP) |
 | `8:00 Sob` | Weekend full ingest + retrain |
+| (zewnętrznie) | Pełny pipeline: `POST /api/pipeline/run` (np. workflow `refresh-production.yml` w GitHub Actions) |
+
+## Produkcja - guardrails odswiezania
+
+Repo zawiera 3 workflow operacyjne, ktore razem minimalizuja ryzyko freeze danych:
+
+- `keepalive-api.yml` - utrzymuje proces Heroku aktywny (rynek co 5 min, poza rynkiem co 20 min).
+- `refresh-production.yml` - niezalezny bezpiecznik odswiezania:
+  - sprawdza `/api/health` i `/api/worker/status`,
+  - wywoluje autoryzowany `POST /api/pipeline/run` tylko gdy dane sa stale / worker nie dziala / trigger jest wymuszony,
+  - ma fallback `POST /api/ingest/incremental`.
+- `daily-check.yml` - posiada bramke swiezosci produkcji (scheduled/manual), ktora failuje CI przy stale-data.
+
+### Wymagane sekrety GitHub Actions
+
+- `HEROKU_API_BASE_URL` - publiczny adres backendu Heroku (np. `https://...herokuapp.com`).
+- `ADMIN_API_KEY` - klucz admin API do autoryzacji `POST /api/pipeline/run` i fallbacku ingest.
+
+### Szybki runbook przy freeze
+
+1. Sprawdz `GET /api/health` - `lastIngestAgeSec`, `recoveryBlockers`, `dataStale`.
+2. Sprawdz `GET /api/worker/status` - `isRunning`, `queueSize`, `activeLocks`.
+3. Uruchom recznie workflow `Production Data Refresh` z `forceRefresh=true`.
+4. Monitoruj `GET /api/pipeline/status` (lub `GET /api/pipeline/latest`) i `GET /api/health` do potwierdzenia nowego ingestu.
+5. Jesli problem wraca, sprawdz logi providerow i limity HTTP (`budgetExhausted`, `batchPartial`).
 
 ## Bezpieczeństwo
 

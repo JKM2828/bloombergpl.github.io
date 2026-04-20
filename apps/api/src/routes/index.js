@@ -129,6 +129,14 @@ router.get('/candles/:ticker', (req, res) => {
   const { from, to, limit, timeframe } = req.query;
   const tf = (timeframe === '1h' || timeframe === '15m' || timeframe === '5m') ? timeframe : '1d';
 
+  const instRow = queryOne('SELECT ticker FROM instruments WHERE ticker = ? AND active = 1', [ticker]);
+  if (!instRow) {
+    return res.status(404).json({
+      error: 'Unknown or inactive ticker',
+      hint: 'Use symbols from GET /api/instruments (e.g. PKNORLEN, CDPROJEKT). Legacy tickers like PKN/CDR are inactive.',
+    });
+  }
+
   let sql = 'SELECT date, open, high, low, close, volume FROM candles WHERE ticker = ? AND (timeframe = ? OR timeframe IS NULL)';
   const params = [ticker, tf];
 
@@ -986,7 +994,12 @@ router.post('/pipeline/run', requireAdmin, async (req, res) => {
     // Fire-and-forget: drain in background, don't block the HTTP response
     drainQueue().catch(err => console.error('[pipeline/run] Background drain error:', err.message));
     res.status(202).json({
-      message: 'Pipeline queued — use GET /api/pipeline/latest to track progress',
+      message: 'Pipeline queued — monitor via GET /api/pipeline/status (or /api/pipeline/latest)',
+      monitor: {
+        status: '/api/pipeline/status',
+        latest: '/api/pipeline/latest',
+        runs: '/api/pipeline/runs',
+      },
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1017,7 +1030,8 @@ router.post('/pipeline/recover', requireAdmin, async (req, res) => {
       },
       monitor: {
         worker: '/api/worker/status',
-        pipeline: '/api/pipeline/latest',
+        pipeline: '/api/pipeline/status',
+        pipelineLatest: '/api/pipeline/latest',
         health: '/api/health',
       },
     });
@@ -1459,6 +1473,14 @@ router.get('/report/validation', (req, res) => {
 // Pipeline Run Status – per-run audit with ticker-level detail
 // ============================================================
 router.get('/pipeline/status', (req, res) => {
+  const latest = getLatestPipelineRun();
+  if (!latest) return res.json({ message: 'No pipeline runs recorded yet', run: null });
+  const detail = getPipelineRunById(latest.run_id);
+  res.json({ run: detail });
+});
+
+// Backward-compatible alias used by existing operators/workflows.
+router.get('/pipeline/latest', (req, res) => {
   const latest = getLatestPipelineRun();
   if (!latest) return res.json({ message: 'No pipeline runs recorded yet', run: null });
   const detail = getPipelineRunById(latest.run_id);

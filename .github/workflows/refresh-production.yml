@@ -1,0 +1,175 @@
+name: Production Data Refresh
+
+on:
+  schedule:
+    # Weekdays ~06:00 Warsaw (approx. 04:00 UTC in DST): one guaranteed pipeline attempt after cold slug/DB.
+    - cron: '0 4 * * 1-5'
+    # Market safety net (Warsaw ~9-17, UTC ~7-15): check every 20 min.
+    - cron: '*/20 7-15 * * 1-5'
+    # Weekdays outside market window.
+    - cron: '20 0-6,16-23 * * 1-5'
+    # Weekends.
+    - cron: '20 * * * 0,6'
+  workflow_dispatch:
+    inputs:
+      forceRefresh:
+        description: 'Force refresh even when freshness is within threshold'
+        required: false
+        default: false
+        type: boolean
+      reason:
+        description: 'Optional reason for manual trigger'
+        required: false
+        default: 'manual_dispatch'
+        type: string
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Trigger production refresh when stale
+        env:
+          API_BASE_URL: ${{ secrets.HEROKU_API_BASE_URL }}
+          ADMIN_API_KEY: ${{ secrets['ADMIN_API_KEY'] }}
+          FORCE_REFRESH: ${{ github.event.inputs.forceRefresh || 'false' }}
+          REFRESH_REASON: ${{ github.event.inputs.reason || 'scheduled_guard' }}
+        run: |
+          set -euo pipefail
+
+          # Daily pre-market cron: force pipeline (recover from empty/stale DB after deploy)
+          case "${{ github.event.schedule }}" in
+            "0 4 * * 1-5")
+              FORCE_REFRESH=true
+              REFRESH_REASON="daily_pre_market"
+              ;;
+          esac
+
+          if [ -z "${ADMIN_API_KEY:-}" ]; then
+            echo "Missing required secret: ADMIN_API_KEY" >&2
+            exit 1
+          fi
+
+          DEFAULT_BASE_URL="https://bloomberpl-da6e13c64b4e.herokuapp.com"
+          RAW_BASE_URL="${API_BASE_URL:-}"
+          SANITIZED_BASE_URL="$(printf '%s' "$RAW_BASE_URL" | sed "s/\r//g; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^['\"]//; s/['\"]$//")"
+          if [ -n "$SANITIZED_BASE_URL" ] && [[ ! "$SANITIZED_BASE_URL" =~ ^https?:// ]]; then
+            SANITIZED_BASE_URL="https://${SANITIZED_BASE_URL}"
+          fi
+          BASE_URL="${SANITIZED_BASE_URL:-$DEFAULT_BASE_URL}"
+
+          KEEPALIVE_URL="${BASE_URL%/}/keepalive"
+          HEALTH_URL="${BASE_URL%/}/api/health"
+          WORKER_URL="${BASE_URL%/}/api/worker/status"
+          PIPELINE_URL="${BASE_URL%/}/api/pipeline/run"
+          INGEST_URL="${BASE_URL%/}/api/ingest/incremental"
+
+          echo "Target base URL: ${BASE_URL}"
+          echo "Force refresh: ${FORCE_REFRESH}"
+
+          keepalive_code="$(curl -sS --connect-timeout 12 --max-time 30 -o /tmp/refresh-keepalive.json -w "%{http_code}" "$KEEPALIVE_URL")"
+          echo "Keepalive HTTP: ${keepalive_code}"
+          cat /tmp/refresh-keepalive.json || true
+
+          if [ "$keepalive_code" -lt 200 ] || [ "$keepalive_code" -ge 300 ]; then
+            echo "Keepalive failed, aborting refresh guard." >&2
+            exit 1
+          fi
+
+          health_code="$(curl -sS --connect-timeout 12 --max-time 30 -o /tmp/refresh-health.json -w "%{http_code}" "$HEALTH_URL")"
+          worker_code="$(curl -sS --connect-timeout 12 --max-time 30 -o /tmp/refresh-worker.json -w "%{http_code}" "$WORKER_URL")"
+
+          echo "Health HTTP: ${health_code}"
+          echo "Worker HTTP: ${worker_code}"
+
+          if [ "$health_code" -lt 200 ] || [ "$health_code" -ge 300 ]; then
+            echo "Health endpoint unavailable" >&2
+            cat /tmp/refresh-health.json || true
+            exit 1
+          fi
+
+          if [ "$worker_code" -lt 200 ] || [ "$worker_code" -ge 300 ]; then
+            echo "Worker endpoint unavailable" >&2
+            cat /tmp/refresh-worker.json || true
+            exit 1
+          fi
+
+          node -e '
+            const fs = require("fs");
+            const force = /^(1|true|yes)$/i.test(String(process.env.FORCE_REFRESH || "false"));
+            const health = JSON.parse(fs.readFileSync("/tmp/refresh-health.json", "utf8"));
+            const worker = JSON.parse(fs.readFileSync("/tmp/refresh-worker.json", "utf8"));
+            const mode = worker.currentMode || "unknown";
+            const maxAgeSec = mode === "market" ? 1800 : 7200;
+            const ageSec = typeof health.lastIngestAgeSec === "number" ? health.lastIngestAgeSec : Number.POSITIVE_INFINITY;
+            const staleAll = !!health.dataStale && health.freshness && health.freshness.total > 0 && health.freshness.stale >= health.freshness.total;
+            const workerDown = !worker.isRunning;
+
+            const reasons = [];
+            if (force) reasons.push("forced");
+            if (workerDown) reasons.push("worker_down");
+            if (staleAll) reasons.push("all_data_stale");
+            if (ageSec > maxAgeSec) reasons.push(`last_ingest_age_exceeded:${ageSec}>${maxAgeSec}`);
+
+            const shouldTrigger = reasons.length > 0;
+            const summary = {
+              shouldTrigger,
+              reasons,
+              mode,
+              ageSec,
+              maxAgeSec,
+              workerRunning: worker.isRunning,
+              stale: health.freshness?.stale ?? null,
+              total: health.freshness?.total ?? null,
+              recoveryBlockers: health.recoveryBlockers || [],
+            };
+            fs.writeFileSync("/tmp/refresh-decision.json", JSON.stringify(summary, null, 2));
+            console.log("Refresh decision:", summary);
+          '
+
+          should_trigger="$(node -e 'const fs=require("fs"); const d=JSON.parse(fs.readFileSync("/tmp/refresh-decision.json", "utf8")); process.stdout.write(d.shouldTrigger ? "1" : "0");')"
+
+          if [ "$should_trigger" != "1" ]; then
+            echo "Refresh trigger skipped: freshness is within threshold and worker is healthy."
+            cat /tmp/refresh-decision.json
+            exit 0
+          fi
+
+          payload="$(node -e 'const reason = String(process.env.REFRESH_REASON || "scheduled_guard"); process.stdout.write(JSON.stringify({ source: "github-actions", reason }));')"
+
+          pipeline_code="$(curl -sS --connect-timeout 12 --max-time 45 -o /tmp/refresh-pipeline.json -w "%{http_code}" \
+            -X POST "$PIPELINE_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${ADMIN_API_KEY}" \
+            -d "$payload")"
+
+          echo "Pipeline trigger HTTP: ${pipeline_code}"
+          cat /tmp/refresh-pipeline.json || true
+
+          if [ "$pipeline_code" -ge 200 ] && [ "$pipeline_code" -lt 300 ]; then
+            echo "Pipeline trigger accepted."
+            exit 0
+          fi
+
+          if [ "$pipeline_code" = "429" ]; then
+            echo "Pipeline trigger rate-limited (429). Treating as soft-pass to avoid false alarm."
+            exit 0
+          fi
+
+          echo "Pipeline trigger failed, trying fallback incremental ingest..."
+
+          ingest_code="$(curl -sS --connect-timeout 12 --max-time 45 -o /tmp/refresh-ingest.json -w "%{http_code}" \
+            -X POST "$INGEST_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${ADMIN_API_KEY}")"
+
+          echo "Incremental ingest fallback HTTP: ${ingest_code}"
+          cat /tmp/refresh-ingest.json || true
+
+          if [ "$ingest_code" -ge 200 ] && [ "$ingest_code" -lt 300 ]; then
+            echo "Fallback ingest succeeded."
+            exit 0
+          fi
+
+          echo "Both pipeline trigger and fallback ingest failed." >&2
+          exit 1

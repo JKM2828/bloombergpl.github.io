@@ -130,3 +130,92 @@ jobs:
               process.exit(1);
             });
           "
+
+      - name: Production freshness gate
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          API_BASE_URL: ${{ secrets.HEROKU_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          DEFAULT_BASE_URL="https://bloomberpl-da6e13c64b4e.herokuapp.com"
+          RAW_BASE_URL="${API_BASE_URL:-}"
+          if [ -z "$RAW_BASE_URL" ]; then
+            echo "HEROKU_API_BASE_URL secret is required for production freshness gate." >&2
+            exit 1
+          fi
+          SANITIZED_BASE_URL="$(printf '%s' "$RAW_BASE_URL" | sed "s/\r//g; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^['\"]//; s/['\"]$//")"
+          if [ -n "$SANITIZED_BASE_URL" ] && [[ ! "$SANITIZED_BASE_URL" =~ ^https?:// ]]; then
+            SANITIZED_BASE_URL="https://${SANITIZED_BASE_URL}"
+          fi
+          BASE_URL="${SANITIZED_BASE_URL:-$DEFAULT_BASE_URL}"
+
+          HEALTH_URL="${BASE_URL%/}/api/health"
+          WORKER_URL="${BASE_URL%/}/api/worker/status"
+
+          echo "Checking production freshness on: ${BASE_URL}"
+
+          health_code="$(curl -sS --connect-timeout 12 --max-time 30 -o /tmp/prod-health.json -w "%{http_code}" "$HEALTH_URL")"
+          worker_code="$(curl -sS --connect-timeout 12 --max-time 30 -o /tmp/prod-worker.json -w "%{http_code}" "$WORKER_URL")"
+
+          echo "Health HTTP: ${health_code}"
+          echo "Worker HTTP: ${worker_code}"
+
+          if [ "$health_code" -lt 200 ] || [ "$health_code" -ge 300 ]; then
+            echo "Health endpoint check failed" >&2
+            cat /tmp/prod-health.json || true
+            exit 1
+          fi
+
+          if [ "$worker_code" -lt 200 ] || [ "$worker_code" -ge 300 ]; then
+            echo "Worker status endpoint check failed" >&2
+            cat /tmp/prod-worker.json || true
+            exit 1
+          fi
+
+          node -e '
+            const fs = require("fs");
+            const health = JSON.parse(fs.readFileSync("/tmp/prod-health.json", "utf8"));
+            const worker = JSON.parse(fs.readFileSync("/tmp/prod-worker.json", "utf8"));
+            const mode = worker.currentMode || "unknown";
+            const maxAgeSec = mode === "market" ? 1800 : 7200;
+            const failures = [];
+
+            if (!worker.isRunning) {
+              failures.push("worker is not running");
+            }
+
+            if (typeof health.lastIngestAgeSec !== "number") {
+              failures.push("lastIngestAgeSec missing in /api/health");
+            } else if (health.lastIngestAgeSec > maxAgeSec) {
+              failures.push(`lastIngestAgeSec=${health.lastIngestAgeSec} exceeds threshold=${maxAgeSec} in mode=${mode}`);
+            }
+
+            const freshness = health.freshness || {};
+            if (health.dataStale && freshness.total > 0 && freshness.stale >= freshness.total) {
+              failures.push("all instruments stale and dataStale=true");
+            }
+
+            const blockers = Array.isArray(health.recoveryBlockers) ? health.recoveryBlockers : [];
+            if (blockers.includes("Worker scheduler is not running")) {
+              failures.push("health reports worker scheduler is not running");
+            }
+
+            console.log("Freshness summary:", {
+              mode,
+              lastIngestAgeSec: health.lastIngestAgeSec,
+              maxAgeSec,
+              stale: freshness.stale,
+              total: freshness.total,
+              workerRunning: worker.isRunning,
+              blockers,
+            });
+
+            if (failures.length > 0) {
+              console.error("Production freshness gate failed:");
+              for (const item of failures) console.error(" -", item);
+              process.exit(1);
+            }
+
+            console.log("Production freshness gate passed.");
+          '

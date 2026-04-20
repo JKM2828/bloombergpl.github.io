@@ -49,6 +49,22 @@ app.use(cors({
 }));
 app.use(express.json());
 
+/** Same token resolution as requireAdmin — used to skip IP costly limit for CI/automation. */
+function extractAdminToken(req) {
+  const header = req.headers.authorization || '';
+  const apiKey = req.headers['x-api-key'];
+  let token = apiKey;
+  if (!token && header.startsWith('Bearer ')) token = header.slice(7);
+  return token || null;
+}
+
+function isValidAdminToken(req) {
+  const expected = process.env.ADMIN_API_KEY;
+  if (!expected) return false;
+  const token = extractAdminToken(req);
+  return !!token && token === expected;
+}
+
 // Rate limiting — 120 req/min per IP (generous for dashboard polling)
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -59,12 +75,14 @@ const apiLimiter = rateLimit({
 });
 app.use('/api', apiLimiter);
 
-// Stricter rate-limit for costly / admin POST endpoints (3 req / 10 min)
+// Stricter rate-limit for costly / admin POST endpoints (3 req / 10 min per IP).
+// Valid ADMIN_API_KEY bypasses this so GitHub Actions refresh pipelines are not starved by 429.
 const costlyLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 3,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => isValidAdminToken(req),
   message: { error: 'Rate limit exceeded for costly operation. Try again in a few minutes.' },
 });
 const costlyPaths = [

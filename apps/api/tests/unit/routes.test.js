@@ -308,6 +308,39 @@ describe('portfolio endpoints require requireAdmin', () => {
   });
 });
 
+describe('pipeline monitor route contracts', () => {
+  it('GET /pipeline/latest alias exists for backward compatibility', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const routeSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'src', 'routes', 'index.js'),
+      'utf8'
+    );
+    assert.ok(
+      routeSrc.includes("router.get('/pipeline/latest'"),
+      'GET /pipeline/latest alias should exist'
+    );
+  });
+
+  it('POST /pipeline/run response exposes valid monitor endpoints', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const routeSrc = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'src', 'routes', 'index.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      routeSrc.includes("status: '/api/pipeline/status'"),
+      'pipeline/run monitor should include /api/pipeline/status'
+    );
+    assert.ok(
+      routeSrc.includes("latest: '/api/pipeline/latest'"),
+      'pipeline/run monitor should include /api/pipeline/latest'
+    );
+  });
+});
+
 // ---- XSS: competition onclick uses esc() ----
 describe('XSS: competition sell button escaping', () => {
   it('compSellPosition onclick uses esc() for ticker', () => {

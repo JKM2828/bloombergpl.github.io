@@ -24,6 +24,20 @@ const BUDGET_PROFILES = {
 
 function getBudget() {
   const mode = getCurrentMode();
+  if (mode === 'night') {
+    // After dyno restart / deploy, DB is often far behind — night caps (5+3 HTTP) cannot
+    // cover 200+ tickers in one Stooq JSON batch. Use off-hours budget until daily data catches up.
+    try {
+      const row = queryOne(
+        "SELECT MAX(date) as d FROM candles WHERE (timeframe = '1d' OR timeframe IS NULL OR timeframe = '1d')"
+      );
+      if (!row || !row.d) return BUDGET_PROFILES.market;
+      const last = new Date(String(row.d).replace(/-/g, '/') + 'T12:00:00');
+      if (Number.isNaN(last.getTime())) return BUDGET_PROFILES[mode];
+      const daysBehind = (Date.now() - last.getTime()) / 86400000;
+      if (daysBehind > 2.5) return BUDGET_PROFILES['off-hours'];
+    } catch (_e) { /* keep night */ }
+  }
   return BUDGET_PROFILES[mode] || BUDGET_PROFILES.market;
 }
 

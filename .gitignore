@@ -6,3 +6,7 @@ build/
 .DS_Store
 .vercel
 .env*.local
+
+# SQLite — never ship production DB in git (Heroku slug would reset charts to snapshot)
+apps/api/data/*.db
+apps/api/data/*.db.tmp
