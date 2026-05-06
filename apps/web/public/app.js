@@ -2,9 +2,13 @@
 // GPW Bloomberg AI v2.0 – Frontend Application
 // ============================================================
 
+// Direct Heroku backend — bypasses Vercel CDN cache and rewrite proxy
+// which can cause stale data and auth header forwarding issues
+const HEROKU_ORIGIN = 'https://bloomberpl-da6e13c64b4e.herokuapp.com';
+
 const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
   ? 'http://localhost:3001/api'
-  : '/api';
+  : HEROKU_ORIGIN + '/api';
 
 // WebSocket origin: on localhost connect directly, on Vercel connect to Heroku backend
 // (Vercel rewrites only work for HTTP, not WebSocket)

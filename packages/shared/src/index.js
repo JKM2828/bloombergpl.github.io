@@ -218,6 +218,15 @@ const GPW_FUTURES = [
   // Index futures
   { ticker: 'FW20', name: 'Kontrakt FW20 (biezacy)', type: InstrumentType.FUTURES, sector: 'Derywaty' },
   { ticker: 'FW40', name: 'Kontrakt FW40 (biezacy)', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  // Sector-index futures
+  { ticker: 'FBAS', name: 'Kontrakt na WIG-Banki', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  { ticker: 'FFIN', name: 'Kontrakt na WIG-Finanse', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  { ticker: 'FGMS', name: 'Kontrakt na WIG-Games', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  // Currency futures
+  { ticker: 'FCHF', name: 'Kontrakt na CHF/PLN', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  { ticker: 'FEUR', name: 'Kontrakt na EUR/PLN', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  { ticker: 'FGBP', name: 'Kontrakt na GBP/PLN', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  { ticker: 'FUSD', name: 'Kontrakt na USD/PLN', type: InstrumentType.FUTURES, sector: 'Derywaty' },
   // Single-stock futures
   { ticker: 'F11B', name: 'Kontrakt na 11BIT', type: InstrumentType.FUTURES, sector: 'Derywaty' },
   { ticker: 'FALR', name: 'Kontrakt na ALIOR', type: InstrumentType.FUTURES, sector: 'Derywaty' },
@@ -227,7 +236,8 @@ const GPW_FUTURES = [
   { ticker: 'FACP', name: 'Kontrakt na ASSECO', type: InstrumentType.FUTURES, sector: 'Derywaty' },
   { ticker: 'FAPR', name: 'Kontrakt na APATOR', type: InstrumentType.FUTURES, sector: 'Derywaty' },
   { ticker: 'FMIL', name: 'Kontrakt na MILLENNIUM', type: InstrumentType.FUTURES, sector: 'Derywaty' },
-  { ticker: 'FPEO', name: 'Kontrakt na PEPCO', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  { ticker: 'FPEO', name: 'Kontrakt na PEKAO', type: InstrumentType.FUTURES, sector: 'Derywaty' },
+  { ticker: 'FEBP', name: 'Kontrakt na BENEFIT', type: InstrumentType.FUTURES, sector: 'Derywaty' },
   { ticker: 'FCDR', name: 'Kontrakt na CDPROJEKT', type: InstrumentType.FUTURES, sector: 'Derywaty' },
   { ticker: 'FCPS', name: 'Kontrakt na CYFRPOLSAT', type: InstrumentType.FUTURES, sector: 'Derywaty' },
   { ticker: 'FDIA', name: 'Kontrakt na DINOPL', type: InstrumentType.FUTURES, sector: 'Derywaty' },

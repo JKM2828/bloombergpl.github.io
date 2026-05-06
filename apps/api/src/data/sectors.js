@@ -36,16 +36,20 @@ const SECTOR_MAP = {
   WIG: 'indeks', WIG20: 'indeks', MWIG40: 'indeks', SWIG80: 'indeks',
   // Futures – index
   FW20: 'futures', FW40: 'futures',
+  // Futures – sector-index
+  FBAS: 'futures', FFIN: 'futures', FGMS: 'futures',
+  // Futures – currency
+  FCHF: 'walutowe', FEUR: 'walutowe', FGBP: 'walutowe', FUSD: 'walutowe',
   // Futures – single-stock
   F11B: 'futures', FALR: 'futures', FALE: 'futures', FEAT: 'futures', FASB: 'futures',
-  FACP: 'futures', FAPR: 'futures', FMIL: 'futures', FPEO: 'futures', FCDR: 'futures',
-  FCPS: 'futures', FDIA: 'futures', FDNP: 'futures', FDOM: 'futures', FENA: 'futures',
-  FEUH: 'futures', FGPW: 'futures', FATT: 'futures', FBDX: 'futures', FKTY: 'futures',
-  FING: 'futures', FCAR: 'futures', FJSW: 'futures', FKGH: 'futures', FKRU: 'futures',
-  FLPP: 'futures', FLWB: 'futures', FMAB: 'futures', FMBK: 'futures', FMDV: 'futures',
-  FOPL: 'futures', FPCO: 'futures', FPGE: 'futures', FPKP: 'futures', FPXM: 'futures',
-  FPKN: 'futures', FPKO: 'futures', FPZU: 'futures', FSPL: 'futures', FSVE: 'futures',
-  FTPE: 'futures', FTEN: 'futures', FXTB: 'futures', FZAB: 'futures',
+  FACP: 'futures', FAPR: 'futures', FMIL: 'futures', FPEO: 'futures', FEBP: 'futures',
+  FCDR: 'futures', FCPS: 'futures', FDIA: 'futures', FDNP: 'futures', FDOM: 'futures',
+  FENA: 'futures', FEUH: 'futures', FGPW: 'futures', FATT: 'futures', FBDX: 'futures',
+  FKTY: 'futures', FING: 'futures', FCAR: 'futures', FJSW: 'futures', FKGH: 'futures',
+  FKRU: 'futures', FLPP: 'futures', FLWB: 'futures', FMAB: 'futures', FMBK: 'futures',
+  FMDV: 'futures', FOPL: 'futures', FPCO: 'futures', FPGE: 'futures', FPKP: 'futures',
+  FPXM: 'futures', FPKN: 'futures', FPKO: 'futures', FPZU: 'futures', FSPL: 'futures',
+  FSVE: 'futures', FTPE: 'futures', FTEN: 'futures', FXTB: 'futures', FZAB: 'futures',
 };
 
 // Sector → representative index ticker (for sector-RS calculation)
@@ -54,7 +58,7 @@ const SECTOR_INDEX = {
   technologia: 'WIG', telekomunikacja: 'WIG', surowce: 'WIG', chemia: 'WIG',
   nieruchomosci: 'WIG', budownictwo: 'WIG', przemysl: 'WIG', spozywcze: 'WIG',
   medycyna: 'WIG', media: 'WIG', finanse: 'WIG', logistyka: 'WIG',
-  indeks: null, futures: null,
+  indeks: null, futures: null, walutowe: null,
 };
 
 function getSector(ticker) {
